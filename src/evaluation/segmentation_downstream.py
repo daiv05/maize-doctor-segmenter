@@ -45,7 +45,6 @@ ROW_COLUMNS = (
     "truth_touches_border",
     "border_contact",
     "detected",
-    "fallback",
     "leaf_pixel_recall",
     "leaf_pixel_precision",
     "iou",
@@ -73,7 +72,6 @@ class MaskPair:
     prediction: np.ndarray
     truth_instances: int
     predicted_instances: int
-    fallback: bool
     image_width: int = 0
     image_height: int = 0
 
@@ -162,7 +160,6 @@ def image_metrics(pair: MaskPair, *, minimum_area: float = DEFAULT_MIN_AREA) -> 
         "truth_touches_border": touches_border,
         "border_contact": "touching" if touches_border else "interior",
         "detected": detected,
-        "fallback": pair.fallback,
         # Prioritaria: fracción del tejido foliar real que sobrevive al recorte.
         "leaf_pixel_recall": leaf_pixel_recall,
         "leaf_pixel_precision": (intersection / predicted_area) if predicted_area else 0.0,
@@ -175,7 +172,7 @@ def image_metrics(pair: MaskPair, *, minimum_area: float = DEFAULT_MIN_AREA) -> 
         # Tejido perdido: el error que no puede recuperarse después.
         "under_segmentation_ratio": 1.0 - leaf_pixel_recall,
         # Fondo añadido, relativo al tamaño de la hoja: el error tolerable.
-        "over_segmentation_ratio": max(0.0, predicted_area - intersection) / truth_area,
+        "over_segmentation_ratio": (predicted_area - intersection) / truth_area,
         "cropped_leaf_percent": 100.0 * (1.0 - leaf_pixel_recall),
         "truth_area_fraction": truth_area / total_pixels,
         "predicted_area_fraction": predicted_area / total_pixels,
@@ -213,8 +210,6 @@ def aggregate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "images_without_detection_rate": (
             sum(1 for row in rows if not row["detected"]) / len(rows)
         ),
-        "fallback_images": sum(1 for row in rows if row["fallback"]),
-        "fallback_rate": sum(1 for row in rows if row["fallback"]) / len(rows),
         "mean_leaf_pixel_recall": mean(_as_float(row["leaf_pixel_recall"]) for row in rows),
         "mean_leaf_pixel_precision": mean(
             _as_float(row["leaf_pixel_precision"]) for row in rows
@@ -298,7 +293,6 @@ def build_pairs(
         predicted_polygons = read_yolo_polygons(prediction_path)
         truth = rasterize_polygons(truth_polygons, raster_size)
         prediction = rasterize_polygons(predicted_polygons, raster_size)
-        fallback = prediction.sum() / prediction.size < minimum_area
         try:
             image_width = int(row["width"])
             image_height = int(row["height"])
@@ -320,7 +314,6 @@ def build_pairs(
                 prediction=prediction,
                 truth_instances=int(row["instance_count"]),
                 predicted_instances=len(predicted_polygons),
-                fallback=fallback,
                 image_width=image_width,
                 image_height=image_height,
             )

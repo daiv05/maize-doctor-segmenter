@@ -27,7 +27,7 @@ WIDER = [(0.05, 0.05), (0.65, 0.05), (0.65, 0.65), (0.05, 0.65)]
 HALF = [(0.1, 0.1), (0.35, 0.1), (0.35, 0.6), (0.1, 0.6)]
 
 
-def make_pair(truth, prediction, *, size=64, instances=1, source="corn", fallback=False):
+def make_pair(truth, prediction, *, size=64, instances=1, source="corn"):
     truth_mask = rasterize_polygons(truth, size)
     predicted_mask = rasterize_polygons(prediction, size)
     return MaskPair(
@@ -38,7 +38,6 @@ def make_pair(truth, prediction, *, size=64, instances=1, source="corn", fallbac
         prediction=predicted_mask,
         truth_instances=instances,
         predicted_instances=len(prediction),
-        fallback=fallback,
         image_width=224,
         image_height=224,
     )
@@ -99,11 +98,10 @@ def test_partial_overlap_is_between_zero_and_one() -> None:
     assert metrics["dice"] > metrics["iou"]
 
 
-def test_empty_prediction_counts_as_missing_detection_and_fallback() -> None:
-    pair = make_pair([SQUARE], [], fallback=True)
+def test_empty_prediction_counts_as_missing_detection() -> None:
+    pair = make_pair([SQUARE], [])
     metrics = image_metrics(pair)
     assert metrics["detected"] is False
-    assert metrics["fallback"] is True
     assert metrics["leaf_pixel_recall"] == pytest.approx(0.0)
     assert metrics["cropped_leaf_percent"] == pytest.approx(100.0)
 
@@ -117,22 +115,21 @@ def test_empty_ground_truth_is_rejected() -> None:
         prediction=np.ones((8, 8), dtype=bool),
         truth_instances=0,
         predicted_instances=1,
-        fallback=False,
     )
     with pytest.raises(DownstreamMetricsError):
         image_metrics(pair)
 
 
-def test_aggregate_reports_fallback_and_missing_detection_rates() -> None:
+def test_aggregate_reports_a_single_missing_detection_rate() -> None:
     rows = [
         image_metrics(make_pair([SQUARE], [SQUARE])),
-        image_metrics(make_pair([SQUARE], [], fallback=True)),
+        image_metrics(make_pair([SQUARE], [])),
     ]
     summary = aggregate(rows)
     assert summary["images"] == 2
     assert summary["images_without_detection"] == 1
     assert summary["images_without_detection_rate"] == pytest.approx(0.5)
-    assert summary["fallback_rate"] == pytest.approx(0.5)
+    assert "fallback_rate" not in summary
     assert summary["worst_cropped_leaf_percent"] == pytest.approx(100.0)
 
 
@@ -258,7 +255,7 @@ def test_evaluate_downstream_reads_only_the_requested_split(tmp_path: Path) -> N
     assert len(rows) == 2
     assert summary["overall"]["images"] == 2
     # "b" no tiene predicción: cuenta como fallback y sin detección.
-    assert summary["overall"]["fallback_rate"] == pytest.approx(0.5)
+    assert summary["overall"]["images_without_detection_rate"] == pytest.approx(0.5)
     assert set(summary["by_source"]) == {"corn", "corn_leaf_diseases"}
     assert summary["by_source"]["corn"]["mean_iou"] == pytest.approx(1.0, abs=0.02)
     assert set(summary["by_border_contact"]) == {"interior"}

@@ -78,6 +78,7 @@ class SegmentedLeafProcessorTests(TestCase):
             "min_mask_area_ratio": 0.01,
             "near_full_warning_ratio": 0.98,
             "background_value": [0, 0, 0],
+            "target_size": [224, 224],
             "selection_weights": {
                 "area": 0.45,
                 "center": 0.35,
@@ -100,6 +101,7 @@ class SegmentedLeafProcessorTests(TestCase):
             "min_mask_area_ratio": 0.01,
             "near_full_warning_ratio": 0.98,
             "background_value": [0, 0, 0],
+            "target_size": [224, 224],
             "selection_weights": {
                 "area": 0.45,
                 "center": 0.35,

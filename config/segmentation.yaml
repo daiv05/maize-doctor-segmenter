@@ -4,6 +4,7 @@ paths:
 
 segmentation:
   model: "yolo26n-seg"
+  target_size: [224, 224]
   checkpoint: "leaf_detection/models/doctor_maiz_leaf_segmenter_best.pt"
   ultralytics_version: "8.4.104"
   image_size: 640

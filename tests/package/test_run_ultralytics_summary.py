@@ -315,7 +315,7 @@ def test_validation_observation_uses_effective_ultralytics_loader() -> None:
 
     assert observation == {
         "evaluated_split": "test",
-        "resolved_split_path": "/dataset/images/test",
+        "resolved_split_path": str(Path("/dataset/images/test").resolve()),
         "image_count": 2,
         "instance_count": 3,
     }
@@ -340,14 +340,18 @@ def test_retained_test_contract_counts_fingerprint_pilot_and_best(
         encoding="utf-8",
     )
     label_line = "0 0.1 0.1 0.2 0.1 0.2 0.2\n"
-    for index in range(runner.EXPECTED_TEST_IMAGE_COUNT):
+    other_line = "0 0.5 0.5 0.7 0.5 0.7 0.7\n"
+    image_total = 173
+    for index in range(image_total):
         stem = f"leaf_{index:03d}"
         (image_dir / f"{stem}.jpg").write_bytes(b"jpeg")
-        instance_total = 2 if index < 10 else 1
-        (label_dir / f"{stem}.txt").write_text(
-            label_line * instance_total,
-            encoding="utf-8",
-        )
+        if index < 9:
+            payload = label_line + other_line
+        elif index == 9:
+            payload = label_line * 2
+        else:
+            payload = label_line
+        (label_dir / f"{stem}.txt").write_text(payload, encoding="utf-8")
 
     output = tmp_path / "outputs" / "leaf_detection"
     checkpoint = (
@@ -359,24 +363,24 @@ def test_retained_test_contract_counts_fingerprint_pilot_and_best(
 
     monkeypatch.setattr(runner, "DATASET", dataset)
     monkeypatch.setattr(runner, "OUTPUTS", output)
-    monkeypatch.setattr(
-        runner,
-        "EXPECTED_BEST_CHECKPOINT_SHA256",
-        checkpoint_sha256,
-    )
+    monkeypatch.setenv("SEGMENTATION_EXPECTED_BEST_SHA256", checkpoint_sha256)
     contract = runner.validate_test_evaluation_inputs(
         checkpoint,
         {
-            "split_fingerprints": {
-                "test": runner.EXPECTED_TEST_FINGERPRINT,
-            }
+            "split_fingerprints": {"test": runner.EXPECTED_TEST_FINGERPRINT},
+            "image_counts": {"test": image_total},
+            "mask_counts": {"test": 183},
         },
     )
 
     assert contract["requested_split"] == "test"
-    assert contract["resolved_split_path"].endswith("images/test")
+    assert Path(contract["resolved_split_path"]).parts[-2:] == ("images", "test")
     assert contract["image_count"] == 173
     assert contract["instance_count"] == 183
+    assert contract["annotation_count"] == 183
+    assert contract["loader_instance_count"] == 182
+    assert contract["loader_deduplicated_annotations"] == 1
+    assert contract["loader_deduplicated_images"] == ["leaf_009"]
     assert contract["test_fingerprint"] == runner.EXPECTED_TEST_FINGERPRINT
     assert contract["pilot_used"] is False
     assert contract["checkpoint"]["path"] == str(checkpoint.resolve())

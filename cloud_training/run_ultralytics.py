@@ -22,8 +22,13 @@ import torch
 import yaml
 
 from src.evaluation.segmentation_downstream import ROW_COLUMNS, evaluate_downstream
+from src.evaluation.split_instance_counts import count_split_instances
+from src.training.checkpoint_promotion import expected_best_checkpoint_sha256
 from src.training.segmentation_experiments import materialize_source_balanced_dataset
-from src.training.segmentation_preflight import verify_cloud_training_payload
+from src.training.segmentation_preflight import (
+    EXPECTED_INITIAL_WEIGHTS_SHA256,
+    verify_cloud_training_payload,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,13 +48,8 @@ MODEL_NAME = os.getenv("SEGMENTATION_MODEL", "yolo26n-seg.pt")
 DEVICE = os.getenv("SEGMENTATION_DEVICE", "0")
 DEVICE_INDEX = int(DEVICE.split(",", maxsplit=1)[0])
 REQUESTED_EVALUATION_SPLIT = "test"
-EXPECTED_TEST_IMAGE_COUNT = 173
-EXPECTED_TEST_INSTANCE_COUNT = 183
 EXPECTED_TEST_FINGERPRINT = (
     "046545351ce79431bb1a995dfbc7dfa44c642a18a046860ed5edb9fc0ed89c51"
-)
-EXPECTED_BEST_CHECKPOINT_SHA256 = (
-    "4f66456d05d87f9e7080155eb5cd80c583f34849415ec820c950bd97f9c5ec6f"
 )
 EXPECTED_FASTER_COCO_EVAL = "1.7.2"
 ALLOWED_EXPERIMENT_SEEDS = {7, 42, 1337}
@@ -146,12 +146,27 @@ def verified_weights(
     if not manifest_path.is_file():
         raise RuntimeError(f"Falta manifiesto de pesos verificados: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not manifest.get("resolved") or not manifest.get("path"):
+        raise RuntimeError(
+            f"{manifest_path} no resolvió pesos (resolved={manifest.get('resolved')!r}); "
+            "vuelva a ejecutar el preflight cloud antes de entrenar"
+        )
     path = Path(str(manifest["path"]))
-    if not path.is_file() or sha256(path) != manifest["sha256"]:
-        raise RuntimeError("Los pesos no coinciden con weights_manifest.json")
+    digest = sha256(path) if path.is_file() else None
+    if digest is None or digest != manifest["sha256"]:
+        raise RuntimeError(
+            f"Los pesos no coinciden con {manifest_path.name}: "
+            f"{path} sha256={digest}, esperado {manifest['sha256']}"
+        )
     if expected_filename is not None and path.name != expected_filename:
         raise RuntimeError(
             f"Pesos inesperados: {path.name!r} != {expected_filename!r}"
+        )
+    frozen = EXPECTED_INITIAL_WEIGHTS_SHA256.get(path.name)
+    if frozen is not None and digest != frozen:
+        raise RuntimeError(
+            f"Procedencia de {path.name} fuera del contrato congelado: "
+            f"{digest} != {frozen}"
         )
     return path
 
@@ -316,6 +331,20 @@ def package_trace() -> dict[str, Any]:
     }
 
 
+def _is_vendored(distribution: Any) -> bool:
+    """Indica si una distribución vive dentro de un árbol ``_vendor``.
+
+    setuptools publica metadatos de sus dependencias vendorizadas. Se vuelven visibles
+    para ``importlib.metadata`` en cuanto algo lo importa, así que contarlas haría que
+    el inventario cambiara sin que se instale nada.
+    """
+    try:
+        location = Path(str(distribution.locate_file("")))
+    except Exception:
+        return False
+    return "_vendor" in location.parts
+
+
 def installed_distribution_snapshot() -> dict[str, Any]:
     """Hash the installed distribution inventory to detect runtime installs."""
     rows = sorted(
@@ -326,6 +355,7 @@ def installed_distribution_snapshot() -> dict[str, Any]:
             )
             for distribution in metadata.distributions()
             if str(distribution.metadata.get("Name", "")).strip()
+            and not _is_vendored(distribution)
         }
     )
     encoded = json.dumps(rows, separators=(",", ":"), ensure_ascii=True).encode()
@@ -337,6 +367,7 @@ def installed_distribution_snapshot() -> dict[str, Any]:
         "distribution_count": len(rows),
         "sha256": hashlib.sha256(encoded).hexdigest(),
         "faster_coco_eval": faster_coco_eval,
+        "names": [name for name, _ in rows],
     }
 
 
@@ -437,20 +468,17 @@ def validate_test_evaluation_inputs(
     label_stems = {path.stem for path in labels}
     if image_stems != label_stems:
         raise RuntimeError("La correspondencia images/test ↔ labels/test no es exacta")
-    instance_count = sum(
-        1
-        for label in labels
-        for line in label.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    )
-    if len(images) != EXPECTED_TEST_IMAGE_COUNT:
+    counts = count_split_instances(DATASET, REQUESTED_EVALUATION_SPLIT)
+    locked_images = int(dataset_gate["image_counts"][REQUESTED_EVALUATION_SPLIT])
+    locked_annotations = int(dataset_gate["mask_counts"][REQUESTED_EVALUATION_SPLIT])
+    if len(images) != locked_images or counts.image_count != locked_images:
         raise RuntimeError(
-            f"Conteo test inválido: {len(images)} != {EXPECTED_TEST_IMAGE_COUNT}"
+            f"Conteo test inválido: {len(images)}/{counts.image_count} != {locked_images}"
         )
-    if instance_count != EXPECTED_TEST_INSTANCE_COUNT:
+    if counts.annotation_count != locked_annotations:
         raise RuntimeError(
-            "Instancias test inválidas: "
-            f"{instance_count} != {EXPECTED_TEST_INSTANCE_COUNT}"
+            "Anotaciones test inválidas: "
+            f"{counts.annotation_count} != {locked_annotations}"
         )
     actual_test_fingerprint = str(
         dataset_gate.get("split_fingerprints", {}).get("test", "")
@@ -462,40 +490,65 @@ def validate_test_evaluation_inputs(
         )
 
     checkpoint = checkpoint.resolve()
-    expected_checkpoint = (
-        OUTPUTS / "segmenter/yolo26n_seg_baseline/weights/best.pt"
-    ).resolve()
-    if checkpoint != expected_checkpoint:
+    runs_root = (OUTPUTS / "segmenter").resolve()
+    try:
+        relative = checkpoint.relative_to(runs_root)
+    except ValueError as exc:
         raise RuntimeError(
-            f"Checkpoint de evaluación inesperado: {checkpoint} != {expected_checkpoint}"
+            f"Checkpoint de evaluación fuera de {runs_root}: {checkpoint}"
+        ) from exc
+    if len(relative.parts) != 3 or relative.parts[1:] != ("weights", "best.pt"):
+        raise RuntimeError(
+            "El checkpoint de evaluación debe ser <run>/weights/best.pt; "
+            f"recibido {relative.as_posix()}"
         )
+    run_name = relative.parts[0]
     checkpoint_before = checkpoint_record(checkpoint)
-    if checkpoint_before["sha256"] != EXPECTED_BEST_CHECKPOINT_SHA256:
+    expected_checkpoint_sha256 = expected_best_checkpoint_sha256(OUTPUTS.parent)
+    if checkpoint_before["sha256"] != expected_checkpoint_sha256:
         raise RuntimeError(
             "SHA-256 de best.pt inesperado: "
-            f"{checkpoint_before['sha256']} != {EXPECTED_BEST_CHECKPOINT_SHA256}"
+            f"{checkpoint_before['sha256']} != {expected_checkpoint_sha256}"
         )
 
     evaluation_root = (OUTPUTS / "segmenter_evaluation").resolve()
     expected_save_dir = evaluation_root / "yolo26n_seg_test"
     prediction_dir = evaluation_root / "yolo26n_seg_test_predictions"
     summary_path = evaluation_root / "test_summary.json"
-    collisions = [
-        str(path)
+    previous = [
+        path
         for path in (expected_save_dir, prediction_dir, summary_path)
         if path.exists()
     ]
-    if collisions:
-        raise RuntimeError(
-            "No se reutilizan resultados test existentes: "
-            f"{collisions}"
+    if previous:
+        if os.getenv("FORCE_INTERNAL_TEST_RERUN") != "1":
+            raise RuntimeError(
+                "No se reutilizan resultados test existentes: "
+                f"{[str(path) for path in previous]}. Repetir el test sobre la misma "
+                "configuración invalida su valor metodológico; sólo con una decisión "
+                "formal registrada: FORCE_INTERNAL_TEST_RERUN=1"
+            )
+        archive_root = evaluation_root / "superseded"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for path in previous:
+            shutil.move(str(path), str(archive_root / f"{path.name}.{stamp}"))
+        print(
+            f"FORCE_INTERNAL_TEST_RERUN=1: {len(previous)} artefacto(s) previo(s) "
+            f"archivados en {archive_root}",
+            flush=True,
         )
     return {
         "requested_split": REQUESTED_EVALUATION_SPLIT,
+        "run_name": run_name,
         "dataset_yaml": str(dataset_yaml_path),
         "resolved_split_path": str(resolved_test),
         "image_count": len(images),
-        "instance_count": instance_count,
+        "instance_count": counts.annotation_count,
+        "annotation_count": counts.annotation_count,
+        "loader_instance_count": counts.loader_instance_count,
+        "loader_deduplicated_annotations": counts.deduplicated_annotations,
+        "loader_deduplicated_images": list(counts.deduplicated_images),
         "test_fingerprint": actual_test_fingerprint,
         "pilot_used": False,
         "checkpoint": checkpoint_before,
@@ -721,7 +774,8 @@ def train_mode(mode: str, config_path: Path) -> None:
         )
         if mode == "smoke":
             final = load_yaml(CLOUD_DIR / "configs" / "train_yolo26n_seg.yaml")
-            final["model"] = MODEL_NAME
+            final["model"] = model_path
+            final["initialization_profile"] = initialization_profile
             final["data"] = str(DATASET / "dataset.yaml")
             final["device"] = DEVICE
             final["project"] = str(OUTPUTS / "segmenter")
@@ -1004,15 +1058,17 @@ def evaluate_mode(checkpoint: Path, config_path: Path, split: str) -> None:
         )
     evaluated_image_count = validation_observation.get("image_count")
     evaluated_instance_count = validation_observation.get("instance_count")
+    expected_loader_instances = int(contract["loader_instance_count"])
     if (
-        evaluated_image_count != EXPECTED_TEST_IMAGE_COUNT
-        or evaluated_instance_count != EXPECTED_TEST_INSTANCE_COUNT
+        evaluated_image_count != contract["image_count"]
+        or evaluated_instance_count != expected_loader_instances
     ):
         raise RuntimeError(
-            "Ultralytics no evaluó los conteos test congelados: "
-            f"images={evaluated_image_count}/{EXPECTED_TEST_IMAGE_COUNT}, "
-            f"instances={evaluated_instance_count}/"
-            f"{EXPECTED_TEST_INSTANCE_COUNT}"
+            "Ultralytics no evaluó los conteos test derivados del dataset: "
+            f"images={evaluated_image_count}/{contract['image_count']}, "
+            f"instances={evaluated_instance_count}/{expected_loader_instances} "
+            f"(anotaciones={contract['annotation_count']}, "
+            f"colapsadas por bbox repetido={contract['loader_deduplicated_annotations']})"
         )
     actual_save_dir = Path(
         str(
@@ -1049,9 +1105,13 @@ def evaluate_mode(checkpoint: Path, config_path: Path, split: str) -> None:
         raise RuntimeError("best.pt cambió durante la evaluación")
     environment_after = installed_distribution_snapshot()
     if environment_after != environment_before:
+        added = sorted(set(environment_after["names"]) - set(environment_before["names"]))
+        removed = sorted(set(environment_before["names"]) - set(environment_after["names"]))
         raise RuntimeError(
             "El entorno Python cambió durante la evaluación: "
-            f"before={environment_before}, after={environment_after}"
+            f"añadidas={added}, eliminadas={removed}, "
+            f"before={environment_before['distribution_count']}, "
+            f"after={environment_after['distribution_count']}"
         )
 
     sample_dir = DATASET / "images" / REQUESTED_EVALUATION_SPLIT
@@ -1071,10 +1131,15 @@ def evaluate_mode(checkpoint: Path, config_path: Path, split: str) -> None:
         {
             "status": "passed",
             "requested_split": REQUESTED_EVALUATION_SPLIT,
+            "run_name": contract["run_name"],
             "evaluated_split": evaluated_split,
             "split": REQUESTED_EVALUATION_SPLIT,
             "image_count": contract["image_count"],
             "instance_count": contract["instance_count"],
+            "annotation_count": contract["annotation_count"],
+            "loader_instance_count": contract["loader_instance_count"],
+            "loader_deduplicated_annotations": contract["loader_deduplicated_annotations"],
+            "loader_deduplicated_images": contract["loader_deduplicated_images"],
             "evaluated_image_count": evaluated_image_count,
             "evaluated_instance_count": evaluated_instance_count,
             "test_fingerprint": contract["test_fingerprint"],

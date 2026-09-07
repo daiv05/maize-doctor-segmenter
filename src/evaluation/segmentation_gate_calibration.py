@@ -99,8 +99,11 @@ def calibrated_status(
     area = _float(row, "mask_area_ratio")
     bbox_ratio = _float(row, "mask_bbox_ratio")
     normalized_perimeter = _float(row, "normalized_perimeter")
-    assert area is not None and bbox_ratio is not None
-    assert normalized_perimeter is not None
+    if area is None or bbox_ratio is None or normalized_perimeter is None:
+        raise ValueError(
+            "Fila de calibración incompleta: se requieren mask_area_ratio, "
+            "mask_bbox_ratio y normalized_perimeter"
+        )
     if area >= gate.max_mask_area_ratio:
         return "uncertain"
     if (
@@ -147,15 +150,18 @@ def evaluate_gate(
     }
 
 
+CANDIDATE_GRID: dict[str, tuple[float, ...]] = {
+    "max_mask_area_ratio": (0.995, 0.999),
+    "large_mask_area_ratio": (0.25, 0.35, 0.50, 0.60),
+    "min_large_mask_bbox_ratio": (0.60, 0.70, 0.80, 0.90),
+    "max_large_mask_normalized_perimeter": (6.0, 7.0, 8.0, 9.0),
+    "min_multi_instance_score_margin": (0.20, 0.30, 0.33, 0.40, 0.50),
+}
+
+
 def candidate_gates() -> Iterable[SegmentationQualityGateConfig]:
     """Yield the documented, bounded grid used for audit calibration."""
-    for values in product(
-        (0.995, 0.999),
-        (0.25, 0.35, 0.50, 0.60),
-        (0.60, 0.70, 0.80, 0.90),
-        (6.0, 7.0, 8.0, 9.0),
-        (0.20, 0.30, 0.33, 0.40, 0.50),
-    ):
+    for values in product(*CANDIDATE_GRID.values()):
         yield SegmentationQualityGateConfig(*values)
 
 
@@ -163,9 +169,24 @@ def _distance(
     candidate: SegmentationQualityGateConfig,
     baseline: SegmentationQualityGateConfig,
 ) -> float:
+    """Distancia entre gates con cada eje normalizado por el rango de su rejilla.
+
+    Sin normalizar, el perímetro —que vive en ``(6.0 … 9.0)``— domina el desempate
+    frente a los cuatro umbrales que viven en ``[0, 1]``.
+
+    @param {SegmentationQualityGateConfig} candidate Gate candidato.
+    @param {SegmentationQualityGateConfig} baseline Gate de referencia.
+    @returns {float} Distancia adimensional en ``[0, número de ejes]``.
+    """
     left = candidate.to_metadata()
     right = baseline.to_metadata()
-    return sum(abs(left[key] - right[key]) for key in left)
+    total = 0.0
+    for key in left:
+        span = CANDIDATE_GRID.get(key)
+        width = (max(span) - min(span)) if span else 0.0
+        difference = abs(float(left[key]) - float(right[key]))
+        total += difference / width if width else difference
+    return total
 
 
 def calibrate_gate(

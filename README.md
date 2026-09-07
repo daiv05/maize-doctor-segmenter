@@ -53,12 +53,31 @@ tests/            pruebas exclusivas del flujo de segmentación
 ```bash
 make help
 make leaf-segmentation-preflight
-make leaf-segmentation-cloud-prepare
 make leaf-segmentation-downstream-metrics PREDICTIONS=<directorio>
 make leaf-segmentation-reliability-audit
+make leaf-segmentation-promote-checkpoint
 
 CONFIRM_SEGMENTATION_SMOKE_TRAINING=1 make leaf-segmentation-cloud-smoke
 CONFIRM_SEGMENTATION_TRAINING=1 make leaf-segmentation-cloud-train
+```
+
+El dataset congelado se publica y se recupera desde Hugging Face:
+
+```bash
+make leaf-segmentation-hf-publish HF_SEGMENTATION_STAGE_DIR=<directorio con ~2.4 GB>
+make leaf-segmentation-hf-download
+```
+
+El entrenamiento remoto siembra ese dataset en un Volume de Modal una sola vez:
+
+```bash
+make leaf-segmentation-modal-seed
+make leaf-segmentation-modal-verify-dataset
+make leaf-segmentation-modal-preflight
+CONFIRM_SEGMENTATION_SMOKE_TRAINING=1 make leaf-segmentation-modal-smoke
+CONFIRM_SEGMENTATION_TRAINING=1 make leaf-segmentation-modal-train
+make leaf-segmentation-modal-promote
+make leaf-segmentation-modal-download
 ```
 
 La documentación de estado y decisiones está en

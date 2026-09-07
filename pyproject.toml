@@ -12,8 +12,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev      = ["ipykernel", "jupyterlab", "matplotlib", "seaborn", "pytest", "ruff", "pyright"]
-cloud    = ["modal>=0.64"]
-segmentation = ["torch>=2.2,<2.13", "ultralytics==8.4.104"]
+cloud    = ["modal>=0.64", "huggingface-hub>=0.30"]
+segmentation = ["torch>=2.2,<2.13", "ultralytics==8.4.104", "faster-coco-eval==1.7.2"]
 
 [build-system]
 requires = ["hatchling"]
