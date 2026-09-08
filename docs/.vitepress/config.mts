@@ -14,6 +14,7 @@ const segmentationSidebar = [
       { text: "Mejoras", link: "/es/leaf-detection/segmentation-improvement-protocol" },
       { text: "Resultados D-01", link: "/es/leaf-detection/segmentation-d01-results" },
       { text: "Quality gate", link: "/es/leaf-detection/segmentation-reliability-gate-audit" },
+      { text: "Revisión profunda", link: "/es/leaf-detection/segmentation-pipeline-deep-review" },
     ],
   },
   {
