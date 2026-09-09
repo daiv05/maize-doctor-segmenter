@@ -221,6 +221,15 @@ resoluciones no se controló.
 - Registrar `resolution_bin` como columna de la auditoría del gate y reportar la
   precisión del gate desagregada por bin.
 
+> **Corrección posterior.** En la recomendación de H-05 se propusieron
+> `connected_components` y `largest_component_ratio` como señales ortogonales.
+> Son **constantes** (1 y 1.0) para toda máscara procedente de
+> `rasterize_instance_polygon`, que rellena un único polígono simple. La
+> recomendación sólo se sostiene con `border_contact_count` y
+> `bbox_aspect_ratio`; para medir fragmentación habría que hacerlo antes de
+> rasterizar, sobre los contornos de `masks.xy`. Ver la
+> [bitácora de sesión](bitacora-sesion-2026-09-08.md).
+
 ### H-05 — El gate geométrico colapsa a un solo criterio en la práctica
 
 **Evidencia.** `src/segmentation/quality.py:299-306`: la regla
@@ -543,15 +552,23 @@ reduce tiempo de procesamiento
 ([Frontiers in Plant Science, 2022](https://www.frontiersin.org/journals/plant-science/articles/10.3389/fpls.2022.1031748/full);
 [ScienceDirect, 2024](https://www.sciencedirect.com/science/article/pii/S277237552400131X)).
 
-Hay un matiz importante que conviene incorporar: el enmascarado **no siempre**
-ayuda, y depende de la arquitectura del clasificador. Trabajos sobre estrategias
+Hay un matiz importante que conviene incorporar. Los trabajos sobre estrategias
 de enmascarado distinguen *early masking* (enmascarar píxeles antes del
-clasificador, que es lo que hace `mask_black`) de *late masking* (enmascarar en
-el mapa de características antes del pooling global), y reportan que en varias
-arquitecturas el enmascarado temprano degrada resultados respecto a la imagen
-completa
-([Masking Strategies for Background Bias Removal, 2023](https://arxiv.org/abs/2308.12127);
-[impacto del background removal en clasificación, 2023](https://arxiv.org/html/2308.09764v2)).
+clasificador, que es lo que hace `mask_black`) de *late masking* (enmascarar el
+mapa de características antes del pooling global). [Aniraj et al., ICCVW
+2023](https://arxiv.org/abs/2308.12127) encuentran que **ambas mejoran el
+rendimiento OOD y que el early masking es consistentemente el mejor** — pero
+trabajando con máscaras de buena calidad. El enmascarado sí degrada en otros
+dominios y arquitecturas: en [clasificación y segmentación de imágenes de
+moda](https://arxiv.org/html/2308.09764v2) los backbones Swin-T y PVT de
+Mask R-CNN caen con entrada sin fondo. Y [Xiao et al., ICLR
+2021](https://arxiv.org/abs/2006.09994) muestran que el fondo lleva señal real,
+no sólo sesgo: los modelos alcanzan exactitud no trivial usando sólo el fondo,
+así que eliminarlo también elimina información que el modelo usaba.
+
+La conclusión operativa es que **la calidad de la máscara, no el enmascarado en
+sí, es la variable que decide**. Cuando la máscara falla, la sub-segmentación
+entrega al clasificador información incompleta e irrecuperable.
 
 **Implicación para este proyecto.** El perfil de salida no debería fijarse aquí
 por decreto. `config/segmentation.yaml` ya soporta cuatro perfiles
