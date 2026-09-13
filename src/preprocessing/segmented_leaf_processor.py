@@ -21,6 +21,7 @@ from src.preprocessing.leaf_mask import (
 from src.preprocessing.leaf_roi import (
     BoundingBox,
     crop_leaf_region,
+    crop_square_centered,
     image_to_rgb,
     normalize_rgb_color,
 )
@@ -31,12 +32,14 @@ MASK_BLACK = "mask_black"
 BBOX_CROP = "bbox_crop"
 CROP_MASK_BLACK = "crop_mask_black"
 CROP_MASK_LETTERBOX = "crop_mask_letterbox"
+SQUARE_CROP = "square_crop"
 SUPPORTED_MASK_PROFILES = frozenset(
     {
         MASK_BLACK,
         BBOX_CROP,
         CROP_MASK_BLACK,
         CROP_MASK_LETTERBOX,
+        SQUARE_CROP,
     }
 )
 FALLBACK_ORIGINAL = "original"
@@ -601,6 +604,13 @@ class SegmentedLeafProcessor:
                 self.config.target_size,
                 padding_value=self.config.background_value,
             ).image
+        elif self.config.processing_profile == SQUARE_CROP:
+            processed = crop_square_centered(
+                original,
+                bbox,
+                margin_ratio=0.15,
+                target_size=self.config.target_size,
+            )
         else:  # guarded by config validation
             raise AssertionError(self.config.processing_profile)
 

@@ -296,3 +296,79 @@ def crop_leaf_region(
     clipped = clip_bbox(bbox, image.width, image.height)
     rgb_image = image_to_rgb(image, transparency_background)
     return rgb_image.crop(clipped)
+
+
+def crop_square_centered(
+    image: Image.Image,
+    bbox: BoundingBoxInput,
+    *,
+    margin_ratio: float = 0.15,
+    target_size: Sequence[int] | None = None,
+    transparency_background: int | Sequence[int] = 0,
+    resample: Image.Resampling = Image.Resampling.BILINEAR,
+) -> Image.Image:
+    """Crop a 1:1 square centered around the leaf while preserving natural background.
+
+    Calculates a square window covering the largest dimension of the leaf plus an
+    expandable margin, shifting the window to remain within the original image boundaries
+    (without adding artificial black masks or pixels). If target_size is given, resizes
+    the square crop to the target dimensions preserving 1:1 aspect ratio.
+    """
+    if not isinstance(image, Image.Image):
+        raise TypeError("image debe ser una instancia de PIL.Image.Image")
+    clipped = clip_bbox(bbox, image.width, image.height)
+    x1, y1, x2, y2 = clipped
+    bw = x2 - x1
+    bh = y2 - y1
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+
+    w_img, h_img = image.size
+    max_dim = max(bw, bh)
+    margin = _validate_ratio(margin_ratio, "margin_ratio")
+    side = max_dim * (1.0 + margin)
+    side = min(side, min(w_img, h_img))
+    half = side / 2.0
+
+    sq_x1 = cx - half
+    sq_y1 = cy - half
+    sq_x2 = cx + half
+    sq_y2 = cy + half
+
+    if sq_x1 < 0:
+        shift = -sq_x1
+        sq_x1 = 0.0
+        sq_x2 = min(float(w_img), sq_x2 + shift)
+    if sq_y1 < 0:
+        shift = -sq_y1
+        sq_y1 = 0.0
+        sq_y2 = min(float(h_img), sq_y2 + shift)
+    if sq_x2 > w_img:
+        shift = sq_x2 - float(w_img)
+        sq_x2 = float(w_img)
+        sq_x1 = max(0.0, sq_x1 - shift)
+    if sq_y2 > h_img:
+        shift = sq_y2 - float(h_img)
+        sq_y2 = float(h_img)
+        sq_y1 = max(0.0, sq_y1 - shift)
+
+    crop_coords = (
+        int(math.floor(sq_x1)),
+        int(math.floor(sq_y1)),
+        int(math.ceil(sq_x2)),
+        int(math.ceil(sq_y2)),
+    )
+    crop_coords = clip_bbox(crop_coords, w_img, h_img)
+    rgb = image_to_rgb(image, transparency_background)
+    cropped = rgb.crop(crop_coords)
+
+    if target_size is not None:
+        values = tuple(target_size)
+        if len(values) != 2:
+            raise ValueError("target_size debe contener exactamente (alto, ancho)")
+        th, tw = int(values[0]), int(values[1])
+        if th <= 0 or tw <= 0:
+            raise ValueError("alto y ancho objetivo deben ser mayores que cero")
+        cropped = cropped.resize((tw, th), resample=resample)
+    return cropped
+

@@ -13,6 +13,7 @@ from src.preprocessing.segmented_leaf_processor import (
     CROP_MASK_LETTERBOX,
     FALLBACK_REJECT,
     MASK_BLACK,
+    SQUARE_CROP,
     LeafMaskProcessorConfig,
     SegmentedLeafProcessor,
     mask_processor_config_from_mapping,
@@ -268,3 +269,22 @@ class SegmentedLeafProcessorTests(TestCase):
         self.assertEqual(self.image.size, self.size)
         self.assertEqual(self.image.tobytes(), before)
         self.assertEqual(MASK_BLACK, processor.config.processing_profile)
+
+    def test_square_crop_profile_centers_leaf_without_black_background(self) -> None:
+        # Imagen 100x80 con fondo (25, 120, 45)
+        instance = _instance(self.size, (30, 20, 70, 60), 0.95, 0)
+        processor = self._processor(
+            (instance,),
+            processing_profile=SQUARE_CROP,
+            target_size=(224, 224),
+        )
+        result = processor.process(self.image)
+
+        self.assertFalse(result.fallback_used)
+        self.assertIsNotNone(result.processed_image)
+        self.assertEqual(result.processed_image.size, (224, 224))  # type: ignore[union-attr]
+        # Verificar que la esquina superior izquierda tiene el fondo original
+        # (25, 120, 45), no negro
+        corner_pixel = result.processed_image.getpixel((0, 0))  # type: ignore[union-attr]
+        self.assertEqual(corner_pixel, (25, 120, 45))
+
