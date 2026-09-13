@@ -33,9 +33,12 @@ SEGMENTATION_TARGETS = {
     "leaf-segmentation-cloud-prepare",
     "leaf-segmentation-cloud-check",
     "leaf-segmentation-downstream-metrics",
-    "leaf-segmentation-modal-volume-create",
-    "leaf-segmentation-modal-upload",
-    "leaf-segmentation-modal-prepare",
+    "leaf-segmentation-hf-publish",
+    "leaf-segmentation-hf-download",
+    "leaf-segmentation-promote-checkpoint",
+    "leaf-segmentation-modal-seed",
+    "leaf-segmentation-modal-verify-dataset",
+    "leaf-segmentation-modal-promote",
     "leaf-segmentation-modal-preflight",
     "leaf-segmentation-modal-smoke",
     "leaf-segmentation-modal-train",
@@ -53,6 +56,8 @@ class MakefileSafetyTests(TestCase):
             ["make", *arguments],
             cwd=PROJECT_ROOT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
@@ -60,15 +65,28 @@ class MakefileSafetyTests(TestCase):
     def _dry_run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return self._make("-n", *arguments)
 
+    @staticmethod
+    def _decoded(output: str) -> str:
+        """Deshace la doble codificación que introduce printf en Git para Windows.
+
+        El Makefile es UTF-8 válido, pero ese printf lee sus bytes como cp1252 y los
+        vuelve a emitir en UTF-8, así que la salida llega con mojibake en los acentos.
+        """
+        try:
+            return output.encode("cp1252").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return output
+
     def test_help_works_and_lists_targets(self) -> None:
         result = self._make("help")
         self.assertEqual(result.returncode, 0, result.stderr)
+        printed = self._decoded(result.stdout)
         for heading in (
             "LOCAL / SEGURO:",
             "CLOUD / SIN ENTRENAR:",
             "ENTRENAMIENTO / CONFIRMACIÓN OBLIGATORIA:",
         ):
-            self.assertIn(heading, result.stdout)
+            self.assertIn(heading, printed)
 
     def test_status_is_read_only(self) -> None:
         watched = [
@@ -80,7 +98,7 @@ class MakefileSafetyTests(TestCase):
         before = [(path.stat().st_mtime_ns, path.read_bytes()) for path in watched]
         result = self._make(
             "leaf-segmentation-status",
-            f"PYTHON={sys.executable}",
+            f"PYTHON={Path(sys.executable).as_posix()}",
         )
         after = [(path.stat().st_mtime_ns, path.read_bytes()) for path in watched]
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -227,31 +245,22 @@ class MakefileSafetyTests(TestCase):
             self.assertIn("A10, L4 o A100", result.stderr)
             self.assertNotIn("modal_training.py::preflight", result.stdout)
 
-    def test_modal_volume_flow_uses_the_frozen_package_once(self) -> None:
-        upload = self._dry_run("leaf-segmentation-modal-upload")
-        self.assertEqual(upload.returncode, 0, upload.stderr)
-        self.assertIn(
-            "doctor_maiz_leaf_segmentation_cloud_v7-segmentation-improvements-7a4a5c08-seed42.tar.gz",
-            upload.stdout,
-        )
-        self.assertEqual(upload.stdout.count("modal volume put"), 2)
-        self.assertNotIn("volume put --force", upload.stdout)
-        self.assertNotIn("add_local_dir", upload.stdout)
+    def test_modal_flow_seeds_from_hugging_face_and_pulls_outputs(self) -> None:
+        seed = self._dry_run("leaf-segmentation-modal-seed")
+        self.assertEqual(seed.returncode, 0, seed.stderr)
+        self.assertIn("modal run modal_training.py::seed_dataset", seed.stdout)
+        self.assertNotIn("volume put", seed.stdout)
+        self.assertNotIn(".tar.gz", seed.stdout)
 
-        prepare = self._dry_run("leaf-segmentation-modal-prepare")
-        self.assertEqual(prepare.returncode, 0, prepare.stderr)
-        self.assertIn(
-            "modal run modal_training.py::prepare",
-            prepare.stdout,
-        )
+        verify = self._dry_run("leaf-segmentation-modal-verify-dataset")
+        self.assertEqual(verify.returncode, 0, verify.stderr)
+        self.assertIn("modal run modal_training.py::verify_dataset", verify.stdout)
 
         download = self._dry_run("leaf-segmentation-modal-download")
         self.assertEqual(download.returncode, 0, download.stderr)
         self.assertIn("modal volume get --force", download.stdout)
-        self.assertIn(
-            "/project_v4-7a4a5c08-seed42/outputs/leaf_detection/",
-            download.stdout,
-        )
+        self.assertIn("doctor-maiz-leaf-segmentation-outputs", download.stdout)
+        self.assertIn("leaf_detection", download.stdout)
 
     def test_safe_prepare_has_no_accidental_cloud_or_training_dependencies(self) -> None:
         result = self._dry_run("leaf-segmentation-cloud-prepare")

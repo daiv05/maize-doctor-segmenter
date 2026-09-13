@@ -202,6 +202,12 @@ def mask_geometry(mask: MaskInput) -> MaskGeometry:
 
     The perimeter is the number of foreground/background grid edges. Components
     use 4-connectivity. Both definitions are dependency-free and deterministic.
+
+    ``connected_components`` y ``largest_component_ratio`` valen 1 y 1.0 para toda
+    máscara procedente de ``rasterize_instance_polygon``, que rellena un único
+    polígono simple; sólo se separan con polígonos auto-intersectantes. No sirven
+    como evidencia de que una hoja esté fragmentada: Ultralytics entrega un contorno
+    por instancia, así que un fragmento perdido por oclusión no llega hasta aquí.
     """
     binary = binary_mask_array(mask)
     height, width = binary.shape
@@ -263,6 +269,4 @@ def apply_leaf_mask(
     output = np.empty_like(source)
     output[...] = color
     output[binary] = source[binary]
-    if not np.isfinite(output).all():
-        raise InvalidLeafMaskError("la imagen enmascarada contiene valores no finitos")
     return Image.fromarray(output, mode="RGB")

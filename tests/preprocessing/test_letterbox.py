@@ -12,33 +12,33 @@ class LetterboxTests(TestCase):
         result = letterbox_image(Image.new("RGB", (200, 100), "green"), (224, 224))
 
         self.assertEqual(result.image.size, (224, 224))
-        self.assertEqual(result.resized_size, (224, 112))
+        self.assertEqual(result.resized_size_width_height, (224, 112))
         self.assertEqual(result.padding, (0, 56, 0, 56))
 
     def test_vertical_image_to_square_target(self) -> None:
         result = letterbox_image(Image.new("RGB", (100, 200), "green"), (224, 224))
 
-        self.assertEqual(result.resized_size, (112, 224))
+        self.assertEqual(result.resized_size_width_height, (112, 224))
         self.assertEqual(result.padding, (56, 0, 56, 0))
 
     def test_square_image_has_no_padding(self) -> None:
         result = letterbox_image(Image.new("RGB", (80, 80)), (224, 224))
 
-        self.assertEqual(result.resized_size, (224, 224))
+        self.assertEqual(result.resized_size_width_height, (224, 224))
         self.assertEqual(result.padding, (0, 0, 0, 0))
 
     def test_rectangular_target_uses_height_width_convention(self) -> None:
         result = letterbox_image(Image.new("RGB", (200, 100)), (224, 320))
 
         self.assertEqual(result.image.size, (320, 224))
-        self.assertEqual(result.resized_size, (320, 160))
+        self.assertEqual(result.resized_size_width_height, (320, 160))
         self.assertEqual(result.padding, (0, 32, 0, 32))
 
     def test_aspect_ratio_is_conserved(self) -> None:
         result = letterbox_image(Image.new("RGB", (700, 300)), (224, 224))
 
         source_ratio = 700 / 300
-        resized_ratio = result.resized_size[0] / result.resized_size[1]
+        resized_ratio = result.resized_size_width_height[0] / result.resized_size_width_height[1]
         self.assertAlmostEqual(resized_ratio, source_ratio, delta=0.02)
 
     def test_rgb_padding_value_is_applied(self) -> None:
@@ -64,7 +64,7 @@ class LetterboxTests(TestCase):
         result = letterbox_image(Image.new("RGB", (1000, 1)), (1, 1))
 
         self.assertEqual(result.image.size, (1, 1))
-        self.assertEqual(result.resized_size, (1, 1))
+        self.assertEqual(result.resized_size_width_height, (1, 1))
 
     def test_zero_target_dimension_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "mayores que cero"):

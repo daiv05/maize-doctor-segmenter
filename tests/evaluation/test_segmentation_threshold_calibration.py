@@ -17,7 +17,7 @@ def _candidate(threshold: float, recall: float, dice: float, precision: float):
             "mean_leaf_pixel_recall": recall,
             "mean_dice": dice,
             "mean_leaf_pixel_precision": precision,
-            "fallback_rate": 0.0,
+            "images_without_detection_rate": 0.0,
         },
     }
 

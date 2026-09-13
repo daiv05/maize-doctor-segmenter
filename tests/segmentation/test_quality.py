@@ -99,11 +99,11 @@ class SegmentationQualityTests(TestCase):
         )
         processing = self._process(instances)
 
-        rejected = assess_segmentation(processing)
-        margin_checked = assess_segmentation(processing, reject_multiple_eligible=False)
+        margin_checked = assess_segmentation(processing)
+        rejected = assess_segmentation(processing, reject_multiple_eligible=True)
 
-        self.assertEqual(rejected.reason, "ambiguous_multiple_eligible_leaves")
         self.assertEqual(margin_checked.reason, "ambiguous_instance_score_margin")
+        self.assertEqual(rejected.reason, "ambiguous_multiple_eligible_leaves")
 
     def test_clearly_selected_multiple_leaf_result_can_be_reliable(self) -> None:
         instances = (

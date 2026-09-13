@@ -6,6 +6,7 @@ import ast
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -74,17 +75,18 @@ def _version_validator():
 VALIDATE_IMAGE_VERSIONS = _version_validator()
 
 
-def _project_environment_function(project_root: Path):
+def _project_environment_function(repo_anchor: Path):
     function = next(
         node
         for node in TREE.body
         if isinstance(node, ast.FunctionDef) and node.name == "_project_environment"
     )
     namespace = {
-        "PROJECT_ROOT": project_root,
-        "SEGMENTATION_OUTPUT_ROOT": project_root
-        / "outputs"
-        / "leaf_detection",
+        "REPO_ANCHOR": str(repo_anchor),
+        "DATASET_MOUNT_PATH": "/data",
+        "OUTPUTS_MOUNT_PATH": "/outputs",
+        "DATASET_ROOT": Path("/data/leaf_detection/detector_dataset"),
+        "SEGMENTATION_OUTPUT_ROOT": Path("/outputs/leaf_detection"),
         "os": os,
         "sys": sys,
     }
@@ -98,30 +100,47 @@ def _project_environment_function(project_root: Path):
 
 
 class ModalTrainingContractTests(TestCase):
-    def test_app_volume_and_frozen_package_are_exact(self) -> None:
+    def test_app_volumes_and_mounts_are_exact(self) -> None:
+        self.assertIn("app = modal.App(APP_NAME)", SOURCE)
+        self.assertIn('APP_NAME = "doctor-maiz-leaf-segmentation"', SOURCE)
         self.assertIn(
-            'app = modal.App("doctor-maiz-leaf-segmentation")',
+            'DATASET_VOLUME_NAME = "doctor-maiz-leaf-segmentation-data"',
             SOURCE,
         )
         self.assertIn(
-            'VOLUME_NAME = "doctor-maiz-leaf-segmentation"',
+            'OUTPUTS_VOLUME_NAME = "doctor-maiz-leaf-segmentation-outputs"',
             SOURCE,
         )
-        self.assertIn('VOLUME_MOUNT = Path("/workspace")', SOURCE)
-        self.assertIn("create_if_missing=False", SOURCE)
+        self.assertIn('DATASET_MOUNT_PATH = "/data"', SOURCE)
+        self.assertIn('OUTPUTS_MOUNT_PATH = "/outputs"', SOURCE)
+        self.assertIn("DATASET_MOUNT = Path(DATASET_MOUNT_PATH)", SOURCE)
+        self.assertIn("OUTPUTS_MOUNT = Path(OUTPUTS_MOUNT_PATH)", SOURCE)
         self.assertIn(
-            'PACKAGE_NAME = f"doctor_maiz_leaf_segmentation_cloud_{PACKAGE_VERSION}.tar.gz"',
-            SOURCE,
-        )
-        self.assertIn(
-            'PACKAGE_VERSION = "v7-segmentation-improvements-7a4a5c08-seed42"',
+            'DATASET_ROOT = DATASET_MOUNT / "leaf_detection" / "detector_dataset"',
             SOURCE,
         )
         self.assertIn(
-            'PACKAGE_SHA256 = "a90f3f3089f3e628ae3212aec62fedc734358be813e3cebbfcab0495f69655b6"',
+            'SEGMENTATION_OUTPUT_ROOT = OUTPUTS_MOUNT / "leaf_detection"',
             SOURCE,
         )
-        self.assertIn('PROJECT_ROOT = VOLUME_MOUNT / f"project_{PACKAGE_VERSION}"', SOURCE)
+        for removed in ("PACKAGE_SHA256", "PACKAGE_VERSION", "INCOMING_ROOT", "tarfile"):
+            self.assertNotIn(removed, SOURCE)
+
+    def test_dataset_identity_is_verified_on_the_mount(self) -> None:
+        verify_source = _function_source("_verify_mounted_dataset")
+        self.assertIn("verify_cloud_training_payload(DATASET_ROOT)", verify_source)
+        self.assertIn("EXPECTED_PARENT_FINGERPRINT", verify_source)
+        self.assertIn("EXPECTED_TEST_FINGERPRINT", verify_source)
+        gate_source = _function_source("_dataset_gate")
+        self.assertIn("_verify_mounted_dataset()", gate_source)
+        self.assertIn("_write_json(DATASET_MARKER", gate_source)
+
+    def test_seeding_downloads_from_hugging_face_only(self) -> None:
+        seed_source = _function_source("seed_dataset")
+        self.assertIn("download_dataset(", seed_source)
+        self.assertIn("HF_DATASET_REPO", seed_source)
+        self.assertIn("dataset_volume.commit()", seed_source)
+        self.assertNotIn("outputs_volume.commit()", seed_source)
 
     def test_image_is_reproducible_and_never_embeds_local_data(self) -> None:
         self.assertIn(
@@ -142,12 +161,20 @@ class ModalTrainingContractTests(TestCase):
         ):
             self.assertIn(version, SOURCE)
         for forbidden in (
-            "add_local_dir",
-            "add_local_file",
             ".venv-cloud",
-            "modal.Secret",
+            'add_local_dir("data"',
+            'add_local_dir("outputs"',
+            'add_local_dir("notebooks"',
+            "add_local_dir(\"public\"",
         ):
             self.assertNotIn(forbidden, SOURCE)
+        for shipped in (
+            '.add_local_file("Makefile"',
+            '.add_local_dir("config"',
+            '.add_local_dir("cloud_training"',
+            '.add_local_python_source("src", "scripts")',
+        ):
+            self.assertIn(shipped, SOURCE)
         self.assertIn("IMAGE_RECIPE_SHA256", SOURCE)
         self.assertIn('"modal_image_id": _modal_object_id(modal_image)', SOURCE)
         self.assertIn("python -m pip freeze", SOURCE)
@@ -239,9 +266,7 @@ class ModalTrainingContractTests(TestCase):
         self.assertIn("torch.cuda.is_available()", runtime_source)
 
     def test_project_root_is_first_without_duplicate_in_pythonpath(self) -> None:
-        project_root = Path(
-            "/workspace/project_v7-segmentation-improvements-7a4a5c08-seed42"
-        )
+        project_root = Path("/root")
         project_environment = _project_environment_function(project_root)
         previous = os.pathsep.join(
             (
@@ -269,7 +294,9 @@ class ModalTrainingContractTests(TestCase):
     def test_project_environment_has_no_hardcoded_local_path(self) -> None:
         environment_source = _function_source("_project_environment")
         self.assertNotIn("/home/desarrolloab", environment_source)
-        self.assertIn("project_root = str(PROJECT_ROOT)", environment_source)
+        self.assertIn("pythonpath.insert(0, REPO_ANCHOR)", environment_source)
+        self.assertIn('"PROJECT_DATA_ROOT": DATASET_MOUNT_PATH', environment_source)
+        self.assertIn('"OUTPUT_ROOT": OUTPUTS_MOUNT_PATH', environment_source)
 
     def test_project_environment_allows_importing_src_config(self) -> None:
         project_environment = _project_environment_function(PROJECT_ROOT)
@@ -281,7 +308,7 @@ class ModalTrainingContractTests(TestCase):
                 "-c",
                 "from src.config import PROJECT_ROOT; print(PROJECT_ROOT)",
             ],
-            cwd="/tmp",
+            cwd=tempfile.gettempdir(),
             env=environment,
             text=True,
             capture_output=True,
@@ -308,40 +335,54 @@ class ModalTrainingContractTests(TestCase):
         ):
             self.assertIn("_execute(", _function_source(operation), operation)
 
-    def test_prepare_never_reloads_and_commits_closed_extraction(self) -> None:
-        prepare_source = _function_source("prepare")
-        self.assertNotIn("workspace.reload()", prepare_source)
-        self.assertIn("workspace.commit()", prepare_source)
-        self.assertIn("prepared_already", prepare_source)
-        self.assertIn("prepared_recovered", prepare_source)
-        self.assertLess(
-            prepare_source.index("with tarfile.open"),
-            prepare_source.index("tar.extractall"),
+    def test_initial_weights_survive_the_ephemeral_working_directory(self) -> None:
+        self.assertIn(
+            "PERSISTENT_INITIAL_WEIGHTS = (\n"
+            '    SEGMENTATION_OUTPUT_ROOT / "initial_weights" / INITIAL_WEIGHTS_NAME\n'
+            ")",
+            SOURCE,
         )
-        self.assertLess(
-            prepare_source.index("tar.extractall"),
-            prepare_source.index("extracted.rename(PROJECT_ROOT)"),
+        restore_source = _function_source("_restore_initial_weights")
+        self.assertIn("PERSISTENT_INITIAL_WEIGHTS.is_file()", restore_source)
+        self.assertIn("_sha256(working) == _sha256(PERSISTENT_INITIAL_WEIGHTS)", restore_source)
+        persist_source = _function_source("_persist_initial_weights")
+        self.assertIn("PERSISTENT_INITIAL_WEIGHTS.parent.mkdir", persist_source)
+
+        execute_source = _function_source("_execute")
+        ordered = (
+            "_restore_initial_weights()",
+            "_make(",
+            "_persist_initial_weights()",
+            "outputs_volume.commit()",
         )
+        offsets = [execute_source.index(step) for step in ordered]
+        self.assertEqual(offsets, sorted(offsets))
+
+    def test_dataset_verification_persists_its_marker(self) -> None:
+        verify_source = _function_source("verify_dataset")
+        self.assertIn("_reload_volumes()", verify_source)
+        self.assertIn("_dataset_gate()", verify_source)
         self.assertLess(
-            prepare_source.index("extracted.rename(PROJECT_ROOT)"),
-            prepare_source.rindex("workspace.commit()"),
+            verify_source.index("_dataset_gate()"),
+            verify_source.index("outputs_volume.commit()"),
         )
 
     def test_reload_is_centralized_outside_the_volume_before_access(self) -> None:
-        reload_source = _function_source("_reload_workspace_before_access")
-        self.assertEqual(SOURCE.count("workspace.reload()"), 1)
+        reload_source = _function_source("_reload_volumes")
+        self.assertEqual(SOURCE.count("dataset_volume.reload()"), 1)
+        self.assertEqual(SOURCE.count("outputs_volume.reload()"), 1)
         self.assertLess(
             reload_source.index('os.chdir("/tmp")'),
-            reload_source.index("workspace.reload()"),
+            reload_source.index("dataset_volume.reload()"),
         )
         execute_source = _function_source("_execute")
         ordered_operations = (
-            "_reload_workspace_before_access()",
-            "_prepared_payload()",
-            "os.chdir(PROJECT_ROOT)",
+            "_reload_volumes()",
+            "_dataset_gate()",
+            "os.chdir(REPO_ANCHOR)",
             "_runtime_report(",
             "_make(",
-            "workspace.commit()",
+            "outputs_volume.commit()",
         )
         offsets = [execute_source.index(operation) for operation in ordered_operations]
         self.assertEqual(offsets, sorted(offsets))
@@ -362,27 +403,17 @@ class ModalTrainingContractTests(TestCase):
         self.assertIn("validate_final_config=True", train_source)
         self.assertIn("CONFIRM_SEGMENTATION_TRAINING=1", train_source)
 
-    def test_prepare_recovers_only_its_checksum_scoped_staging(self) -> None:
-        self.assertIn(
-            'PREPARE_STAGING = VOLUME_MOUNT / f".project_extracting_{PACKAGE_SHA256}"',
-            SOURCE,
-        )
-        cleanup_source = _function_source("_remove_prepare_staging")
-        self.assertIn("shutil.rmtree(PREPARE_STAGING)", cleanup_source)
-        self.assertNotIn("INCOMING_ROOT", cleanup_source)
-        self.assertNotIn("PROJECT_ROOT", cleanup_source)
-        prepare_source = _function_source("prepare")
-        self.assertNotIn("shutil.rmtree(INCOMING_ROOT)", prepare_source)
-        self.assertNotIn("shutil.rmtree(PROJECT_ROOT)", prepare_source)
+    def test_only_outputs_can_be_cleaned_and_never_the_dataset(self) -> None:
+        clean_source = _function_source("clean_outputs")
+        self.assertIn("_require_confirmation(confirm", clean_source)
+        self.assertIn("shutil.rmtree(SEGMENTATION_OUTPUT_ROOT", clean_source)
+        self.assertNotIn("DATASET_ROOT", clean_source)
+        self.assertNotIn("DATASET_MOUNT", clean_source)
 
-    def test_prepare_blocks_bad_checksum_before_extraction(self) -> None:
-        prepare_source = _function_source("prepare")
-        self.assertLess(
-            prepare_source.index("actual_sha256 != PACKAGE_SHA256"),
-            prepare_source.index("tarfile.open"),
-        )
-        self.assertIn("SHA-256 del paquete inválido", prepare_source)
-        self.assertIn("Sidecar SHA-256 inconsistente", prepare_source)
+    def test_promotion_registers_the_evaluated_checkpoint_identity(self) -> None:
+        promote_source = _function_source("promote")
+        self.assertIn("promote_checkpoint(OUTPUTS_MOUNT)", promote_source)
+        self.assertIn("outputs_volume.commit()", promote_source)
 
     @staticmethod
     def _valid_image_versions() -> dict[str, str | None]:
@@ -411,16 +442,19 @@ class ModalTrainingContractTests(TestCase):
         self.assertEqual(
             set(functions),
             {
-                "prepare",
+                "seed_dataset",
+                "verify_dataset",
                 "preflight",
                 "smoke",
                 "train",
                 "experiment",
                 "resume",
                 "resume_experiment",
+                "promote",
                 "validate",
                 "results",
                 "checksums",
+                "clean_outputs",
             },
         )
         for name, function in functions.items():
@@ -428,6 +462,9 @@ class ModalTrainingContractTests(TestCase):
             assert isinstance(decorator, ast.Call)
             keywords = {keyword.arg: keyword.value for keyword in decorator.keywords}
             self.assertIn("volumes", keywords, name)
+            if name == "seed_dataset":
+                self.assertIsInstance(keywords["volumes"], ast.Dict)
+                continue
             self.assertIsInstance(keywords["volumes"], ast.Name)
             self.assertEqual(keywords["volumes"].id, "VOLUME_MOUNTS")
 
@@ -448,24 +485,24 @@ class ModalTrainingContractTests(TestCase):
             '"requested_split") != "test"',
             '"evaluated_split") != "test"',
             '"split") != "test"',
-            '"image_count") != 173',
-            '"instance_count") != 183',
+            'locked_counts["image_counts"]["test"]',
+            'locked_counts["mask_counts"]["test"]',
+            '"evaluated_instance_count") != summary.get("loader_instance_count")',
             "EXPECTED_TEST_FINGERPRINT",
-            "EXPECTED_BEST_CHECKPOINT_SHA256",
+            "expected_best_checkpoint_sha256(OUTPUTS_MOUNT)",
             '"pilot_used") is not False',
             "yolo26n_seg_test",
         ):
             self.assertIn(contract, validate_source)
         self.assertNotIn("val_summary.json", validate_source)
 
-    def test_prepare_and_runtime_guards_are_persistent(self) -> None:
+    def test_dataset_and_runtime_guards_are_persistent(self) -> None:
         for contract in (
-            'PROJECT_ROOT = VOLUME_MOUNT / f"project_{PACKAGE_VERSION}"',
-            'INCOMING_ROOT = VOLUME_MOUNT / "incoming"',
-            'PREPARED_MARKER = PROJECT_ROOT / ".modal_package_prepared.json"',
-            "workspace.reload()",
-            "workspace.commit()",
-            '"runtime_environment.lock"',
+            'DATASET_ROOT = DATASET_MOUNT / "leaf_detection" / "detector_dataset"',
+            'MODAL_RUNTIME_ROOT = SEGMENTATION_OUTPUT_ROOT / "modal_runtime"',
+            'DATASET_MARKER = MODAL_RUNTIME_ROOT / "dataset_verification.json"',
+            "dataset_volume.reload()",
+            "outputs_volume.commit()",
             "runtime_environment.modal.lock",
             "ready_for_smoke_training",
             "memory_total_mib",

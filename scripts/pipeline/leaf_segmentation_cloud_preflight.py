@@ -17,6 +17,7 @@ import torch
 
 from src.config import PROJECT_ROOT
 from src.training.segmentation_preflight import (
+    EXPECTED_INITIAL_WEIGHTS_SHA256,
     validate_segmentation_dataset,
     verify_cloud_training_payload,
 )
@@ -214,11 +215,19 @@ def main() -> None:
             candidate = Path(str(getattr(model, "ckpt_path", MODEL_NAME))).resolve()
             if not candidate.is_file():
                 raise FileNotFoundError(f"Pesos no resueltos: {candidate}")
+            candidate_sha256 = sha256(candidate)
+            frozen_sha256 = EXPECTED_INITIAL_WEIGHTS_SHA256.get(candidate.name)
+            weights_manifest["expected_sha256"] = frozen_sha256
+            if frozen_sha256 is not None and candidate_sha256 != frozen_sha256:
+                raise FileNotFoundError(
+                    f"Procedencia de {candidate.name} fuera del contrato congelado: "
+                    f"{candidate_sha256} != {frozen_sha256}"
+                )
             weights_manifest.update(
                 {
                     "resolved": True,
                     "path": str(candidate),
-                    "sha256": sha256(candidate),
+                    "sha256": candidate_sha256,
                     "size_bytes": candidate.stat().st_size,
                     "source": "Ultralytics model resolver",
                     "ultralytics_version": ultralytics_version,

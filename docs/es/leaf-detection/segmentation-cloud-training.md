@@ -29,6 +29,21 @@ piloto, ZIP, outputs históricos, checkpoints, notebooks, entornos y cachés.
 El piloto tiene un manifiesto de transporte separado y no forma parte del
 archivo de entrenamiento.
 
+## Transporte hacia Modal
+
+El dataset congelado se publica una sola vez en Hugging Face con
+`leaf-segmentation-hf-publish` y `modal_training.py::seed_dataset` lo materializa
+dentro del Volume `doctor-maiz-leaf-segmentation-data`. El código viaja en la
+imagen de Modal, de modo que iterarlo no obliga a resubir el dataset.
+
+La identidad del dataset no la da el transporte: antes de cada operación remota,
+`verify_cloud_training_payload` recalcula el fingerprint padre, los tres de split
+y los conteos sobre el árbol montado, y deja constancia en
+`outputs/leaf_detection/modal_runtime/dataset_verification.json`.
+
+Los artefactos viven en el Volume `doctor-maiz-leaf-segmentation-outputs` y se
+bajan completos con `leaf-segmentation-modal-download`.
+
 ## Flujo remoto
 
 ```bash
@@ -62,9 +77,8 @@ Los resultados completos están en
 
 ```bash
 # Operaciones sin épocas de entrenamiento.
-make leaf-segmentation-modal-volume-create
-make leaf-segmentation-modal-upload
-make leaf-segmentation-modal-prepare
+make leaf-segmentation-modal-seed
+make leaf-segmentation-modal-verify-dataset
 make leaf-segmentation-modal-preflight MODAL_SEGMENTATION_GPU=A10
 
 # Primera ablación recomendada: desactivar mosaic.

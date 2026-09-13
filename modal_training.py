@@ -1,13 +1,15 @@
-"""Modal control plane for the frozen DoctorMaiz leaf-segmentation package.
+"""Plano de control Modal para el segmentador de hojas de maíz.
 
-The 2.13 GB release archive is never added to the Modal Image. Upload it once:
+El código viaja en la imagen y el dataset vive en un Volume sembrado una sola vez desde
+Hugging Face, de modo que iterar código no obligue a resubir gigabytes. La garantía del
+dataset no la da el transporte sino ``verify_cloud_training_payload``, que recalcula los
+fingerprints congelados sobre el árbol montado antes de cada operación.
 
-    modal volume put doctor-maiz-leaf-segmentation \
-      <ruta-al-paquete-del-segmentador.tar.gz> \
-      /incoming/
+    modal run modal_training.py::seed_dataset
+    modal run modal_training.py::verify_dataset
+    modal run modal_training.py::preflight
 
-Then invoke the independent remote functions through the segmenter Makefile.
-Training functions require the literal CLI argument ``--confirm true``.
+Las funciones de entrenamiento exigen el argumento literal ``--confirm true``.
 """
 
 # pyright: reportMissingImports=false, reportMissingModuleSource=false
@@ -22,7 +24,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from datetime import datetime, timezone
 from importlib import metadata
@@ -32,26 +33,27 @@ from typing import Any
 import modal
 
 APP_NAME = "doctor-maiz-leaf-segmentation"
-VOLUME_NAME = "doctor-maiz-leaf-segmentation"
-VOLUME_MOUNT = Path("/workspace")
-INCOMING_ROOT = VOLUME_MOUNT / "incoming"
-PACKAGE_VERSION = "v7-segmentation-improvements-7a4a5c08-seed42"
-PACKAGE_NAME = f"doctor_maiz_leaf_segmentation_cloud_{PACKAGE_VERSION}.tar.gz"
-PACKAGE_ROOT_NAME = f"doctor_maiz_leaf_segmentation_cloud_{PACKAGE_VERSION}"
-PACKAGE_SHA256 = "a90f3f3089f3e628ae3212aec62fedc734358be813e3cebbfcab0495f69655b6"
-PROJECT_ROOT = VOLUME_MOUNT / f"project_{PACKAGE_VERSION}"
-ARTIFACT_PROJECT_VERSION = "v4-7a4a5c08-seed42"
-ARTIFACT_PROJECT_ROOT = VOLUME_MOUNT / f"project_{ARTIFACT_PROJECT_VERSION}"
-SEGMENTATION_OUTPUT_ROOT = (
-    ARTIFACT_PROJECT_ROOT / "outputs" / "leaf_detection"
+REPO_ANCHOR = "/root"
+DATASET_VOLUME_NAME = "doctor-maiz-leaf-segmentation-data"
+OUTPUTS_VOLUME_NAME = "doctor-maiz-leaf-segmentation-outputs"
+DATASET_MOUNT_PATH = "/data"
+OUTPUTS_MOUNT_PATH = "/outputs"
+DATASET_MOUNT = Path(DATASET_MOUNT_PATH)
+OUTPUTS_MOUNT = Path(OUTPUTS_MOUNT_PATH)
+DATASET_ROOT = DATASET_MOUNT / "leaf_detection" / "detector_dataset"
+SEGMENTATION_OUTPUT_ROOT = OUTPUTS_MOUNT / "leaf_detection"
+MODAL_RUNTIME_ROOT = SEGMENTATION_OUTPUT_ROOT / "modal_runtime"
+INITIAL_WEIGHTS_NAME = "yolo26n-seg.pt"
+PERSISTENT_INITIAL_WEIGHTS = (
+    SEGMENTATION_OUTPUT_ROOT / "initial_weights" / INITIAL_WEIGHTS_NAME
+)
+HF_DATASET_REPO = os.getenv(
+    "HF_SEGMENTATION_DATASET_REPO",
+    "daiv05/corn-leaf-instance-segmentation",
 )
 EXPECTED_PARENT_FINGERPRINT = "7a4a5c083fc64b067df12bcc95ec976d5a7e3b8a585d0a090b6b3940af4d7d5c"
 EXPECTED_TEST_FINGERPRINT = "046545351ce79431bb1a995dfbc7dfa44c642a18a046860ed5edb9fc0ed89c51"
-EXPECTED_BEST_CHECKPOINT_SHA256 = (
-    "4f66456d05d87f9e7080155eb5cd80c583f34849415ec820c950bd97f9c5ec6f"
-)
-PREPARED_MARKER = PROJECT_ROOT / ".modal_package_prepared.json"
-PREPARE_STAGING = VOLUME_MOUNT / f".project_extracting_{PACKAGE_SHA256}"
+DATASET_MARKER = MODAL_RUNTIME_ROOT / "dataset_verification.json"
 
 BASE_IMAGE_TAG = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
 BASE_IMAGE_DIGEST = "sha256:77f17f843507062875ce8be2a6f76aa6aa3df7f9ef1e31d9d7432f4b0f563dee"
@@ -76,6 +78,7 @@ IMAGE_SYSTEM_PACKAGES = (
 IMAGE_PYTHON_PACKAGES = (
     "filelock==3.18.0",
     f"faster-coco-eval=={EXPECTED_FASTER_COCO_EVAL}",
+    "huggingface-hub==1.30.0",
     "matplotlib==3.10.3",
     "numpy==1.26.4",
     "nvidia-ml-py==12.575.51",
@@ -91,7 +94,8 @@ IMAGE_PYTHON_PACKAGES = (
     "ultralytics-thop==2.0.18",
     f"ultralytics=={EXPECTED_ULTRALYTICS}",
 )
-IMAGE_BUILD_LOCK = Path("/opt/doctor_maiz_modal_image.lock")
+IMAGE_BUILD_LOCK_PATH = "/opt/doctor_maiz_modal_image.lock"
+IMAGE_BUILD_LOCK = Path(IMAGE_BUILD_LOCK_PATH)
 IMAGE_RECIPE = {
     "base_image": BASE_IMAGE,
     "base_image_tag": BASE_IMAGE_TAG,
@@ -131,6 +135,7 @@ def _validate_image_versions(
     actual: dict[str, str | None],
     python_version: tuple[int, ...],
 ) -> None:
+    """Comprueba que la imagen resuelta coincide exactamente con la receta declarada."""
     from packaging.version import InvalidVersion, Version
 
     expected_python = tuple(int(part) for part in EXPECTED_PYTHON.split("."))
@@ -182,7 +187,7 @@ def _validate_image_versions(
 
 
 def _validate_modal_image_versions() -> None:
-    import sys
+    """Valida la imagen durante su construcción, antes de cualquier ejecución."""
     from importlib import metadata
 
     import torch
@@ -203,6 +208,7 @@ def _validate_modal_image_versions() -> None:
         print(f"  {name}: {version}", flush=True)
     _validate_image_versions(actual, tuple(sys.version_info[:3]))
 
+
 modal_image = (
     modal.Image.from_registry(BASE_IMAGE)
     .entrypoint([])
@@ -210,28 +216,45 @@ modal_image = (
     .pip_install(*IMAGE_PYTHON_PACKAGES)
     .run_commands(
         "python -m pip check",
-        f"python -m pip freeze | LC_ALL=C sort > {IMAGE_BUILD_LOCK}",
+        f"python -m pip freeze | LC_ALL=C sort > {IMAGE_BUILD_LOCK_PATH}",
     )
     .run_function(_validate_modal_image_versions)
     .env(
         {
             "PYTHONUNBUFFERED": "1",
-            "YOLO_CONFIG_DIR": "/workspace/runtime/ultralytics",
-            "MPLCONFIGDIR": "/workspace/runtime/matplotlib",
+            "YOLO_AUTOINSTALL": "false",
+            "YOLO_OFFLINE": "true",
+            "YOLO_CONFIG_DIR": "/tmp/ultralytics",
+            "MPLCONFIGDIR": "/tmp/matplotlib",
+            "PROJECT_DATA_ROOT": DATASET_MOUNT_PATH,
+            "OUTPUT_ROOT": OUTPUTS_MOUNT_PATH,
+            "HF_SEGMENTATION_DATASET_REPO": HF_DATASET_REPO,
         }
     )
+    .add_local_file("Makefile", f"{REPO_ANCHOR}/Makefile", copy=True)
+    .add_local_file("pyproject.toml", f"{REPO_ANCHOR}/pyproject.toml", copy=True)
+    .add_local_dir("config", f"{REPO_ANCHOR}/config", copy=True)
+    .add_local_dir("cloud_training", f"{REPO_ANCHOR}/cloud_training", copy=True)
+    .add_local_python_source("src", "scripts")
 )
 
-app = modal.App("doctor-maiz-leaf-segmentation")
-workspace = modal.Volume.from_name(VOLUME_NAME, create_if_missing=False)
-VOLUME_MOUNTS: dict[Any, Any] = {str(VOLUME_MOUNT): workspace}
+app = modal.App(APP_NAME)
+dataset_volume = modal.Volume.from_name(DATASET_VOLUME_NAME, create_if_missing=True)
+outputs_volume = modal.Volume.from_name(OUTPUTS_VOLUME_NAME, create_if_missing=True)
+VOLUME_MOUNTS: dict[Any, Any] = {
+    DATASET_MOUNT_PATH: dataset_volume,
+    OUTPUTS_MOUNT_PATH: outputs_volume,
+}
+HF_SECRET = modal.Secret.from_name("hf")
 
 
 def _utc_now() -> str:
+    """Devuelve el instante actual en UTC ISO-8601."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _sha256(path: Path) -> str:
+    """Calcula el SHA-256 de un archivo por bloques."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -240,15 +263,10 @@ def _sha256(path: Path) -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Escribe un JSON de forma atómica."""
     path.parent.mkdir(parents=True, exist_ok=True)
     serialized = (
-        json.dumps(
-            payload,
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        + "\n"
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     )
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -266,6 +284,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _modal_object_id(handle: object) -> str | None:
+    """Devuelve el identificador de un objeto Modal cuando está disponible."""
     try:
         value = getattr(handle, "object_id")
     except AttributeError:
@@ -279,77 +298,28 @@ def _run(
     cwd: Path,
     environment: dict[str, str] | None = None,
 ) -> None:
+    """Ejecuta un comando registrando la línea exacta invocada."""
     print(f"+ {shlex.join(command)}", flush=True)
-    subprocess.run(
-        command,
-        cwd=cwd,
-        env=environment,
-        check=True,
-    )
-
-
-def _verify_extracted_release(root: Path) -> dict[str, Any]:
-    manifest_path = root / "cloud_training" / "package_manifest.json"
-    checksums_path = root / "cloud_training" / "checksums.sha256"
-    if not manifest_path.is_file() or not checksums_path.is_file():
-        raise RuntimeError("La extracción no contiene manifiesto/checksums cloud")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("package_version") != PACKAGE_VERSION:
-        raise RuntimeError(f"Versión extraída inválida: {manifest.get('package_version')!r}")
-    if manifest.get("parent_fingerprint") != EXPECTED_PARENT_FINGERPRINT:
-        raise RuntimeError("El fingerprint padre del paquete no es el congelado")
-    jpeg_validation = manifest.get("jpeg_validation")
-    if (
-        not isinstance(jpeg_validation, dict)
-        or jpeg_validation.get("passed") is not True
-        or jpeg_validation.get("ultralytics_scan", {}).get("mutated_file_count") != 0
-    ):
-        raise RuntimeError("El paquete no declara un escaneo JPEG/Ultralytics limpio")
-    _run(
-        ["sha256sum", "--check", "--quiet", str(checksums_path)],
-        cwd=root,
-    )
-    return manifest
-
-
-def _prepared_payload() -> dict[str, Any]:
-    if not PREPARED_MARKER.is_file():
-        raise RuntimeError(f"Falta {PREPARED_MARKER}; ejecute primero modal_training.py::prepare")
-    payload = json.loads(PREPARED_MARKER.read_text(encoding="utf-8"))
-    if (
-        payload.get("status") != "ready"
-        or payload.get("package_sha256") != PACKAGE_SHA256
-        or payload.get("package_version") != PACKAGE_VERSION
-        or payload.get("jpeg_validation", {}).get("ultralytics_scan", {}).get(
-            "mutated_file_count"
-        )
-        != 0
-    ):
-        raise RuntimeError("La extracción preparada no corresponde al paquete esperado")
-    return payload
+    subprocess.run(command, cwd=cwd, env=environment, check=True)
 
 
 def _project_environment() -> dict[str, str]:
+    """Construye el entorno que resuelve raíces y binarios dentro del contenedor."""
     environment = os.environ.copy()
-
-    project_root = str(PROJECT_ROOT)
-    current_pythonpath = environment.get("PYTHONPATH", "")
-    pythonpath_entries = [
-        entry for entry in current_pythonpath.split(os.pathsep) if entry
+    pythonpath = [
+        entry
+        for entry in environment.get("PYTHONPATH", "").split(os.pathsep)
+        if entry and entry != REPO_ANCHOR
     ]
-    pythonpath_entries = [
-        entry for entry in pythonpath_entries if entry != project_root
-    ]
-    pythonpath_entries.insert(0, project_root)
-    environment["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
-
+    pythonpath.insert(0, REPO_ANCHOR)
+    environment["PYTHONPATH"] = os.pathsep.join(pythonpath)
     environment.update(
         {
             "PYTHON": sys.executable,
-            "CLOUD_TRAINING_DIR": str(PROJECT_ROOT / "cloud_training"),
-            "LEAF_SEGMENTATION_DATASET": str(
-                PROJECT_ROOT / "data" / "leaf_detection" / "detector_dataset"
-            ),
+            "CLOUD_TRAINING_DIR": f"{REPO_ANCHOR}/cloud_training",
+            "PROJECT_DATA_ROOT": DATASET_MOUNT_PATH,
+            "OUTPUT_ROOT": OUTPUTS_MOUNT_PATH,
+            "LEAF_SEGMENTATION_DATASET": str(DATASET_ROOT),
             "LEAF_SEGMENTATION_OUTPUT": str(SEGMENTATION_OUTPUT_ROOT),
             "SEGMENTATION_MODEL": "yolo26n-seg.pt",
             "SEGMENTATION_DEVICE": "0",
@@ -359,6 +329,7 @@ def _project_environment() -> dict[str, str]:
 
 
 def _nvidia_smi() -> dict[str, Any]:
+    """Consulta el estado de la GPU asignada."""
     completed = subprocess.run(
         [
             "nvidia-smi",
@@ -383,12 +354,14 @@ def _nvidia_smi() -> dict[str, Any]:
 
 
 def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
+    """Registra la identidad del runtime remoto dentro del árbol descargable."""
     import torch
     import torchvision
 
-    runtime_root = PROJECT_ROOT / "outputs" / "leaf_detection" / "modal_runtime"
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    build_lock = IMAGE_BUILD_LOCK.read_text(encoding="utf-8") if IMAGE_BUILD_LOCK.is_file() else ""
+    MODAL_RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    build_lock = (
+        IMAGE_BUILD_LOCK.read_text(encoding="utf-8") if IMAGE_BUILD_LOCK.is_file() else ""
+    )
     actual_versions = {
         "python": platform.python_version(),
         "torch": metadata.version("torch"),
@@ -400,13 +373,15 @@ def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
         "torch_cuda": torch.version.cuda,
     }
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "checking",
         "operation": operation,
         "utc": _utc_now(),
         "app": APP_NAME,
-        "volume": VOLUME_NAME,
-        "volume_mount": str(VOLUME_MOUNT),
+        "dataset_volume": DATASET_VOLUME_NAME,
+        "outputs_volume": OUTPUTS_VOLUME_NAME,
+        "dataset_mount": DATASET_MOUNT_PATH,
+        "outputs_mount": OUTPUTS_MOUNT_PATH,
         "function_call_id": modal.current_function_call_id(),
         "input_id": modal.current_input_id(),
         "requested_gpu": REQUESTED_GPU,
@@ -415,7 +390,8 @@ def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
         "base_image_tag": BASE_IMAGE_TAG,
         "base_image_digest": BASE_IMAGE_DIGEST,
         "modal_image_id": _modal_object_id(modal_image),
-        "modal_volume_id": _modal_object_id(workspace),
+        "modal_dataset_volume_id": _modal_object_id(dataset_volume),
+        "modal_outputs_volume_id": _modal_object_id(outputs_volume),
         "image_recipe_sha256": IMAGE_RECIPE_SHA256,
         "image_build_lock_sha256": (
             hashlib.sha256(build_lock.encode()).hexdigest() if build_lock else None
@@ -464,8 +440,8 @@ def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
     report["status"] = "ready" if not errors else "blocked"
 
     call_id = report["function_call_id"] or report["input_id"] or "unknown"
-    _write_json(runtime_root / f"{operation}_{call_id}.json", report)
-    _write_json(runtime_root / f"{operation}_latest.json", report)
+    _write_json(MODAL_RUNTIME_ROOT / f"{operation}_{call_id}.json", report)
+    _write_json(MODAL_RUNTIME_ROOT / f"{operation}_latest.json", report)
     lock_lines = {
         "base_image": BASE_IMAGE,
         "image_recipe_sha256": IMAGE_RECIPE_SHA256,
@@ -478,15 +454,10 @@ def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
         "faster_coco_eval": report["faster_coco_eval"],
         "requested_gpu": REQUESTED_GPU,
     }
-    serialized_lock = "".join(f"{key}={value}\n" for key, value in lock_lines.items())
-    for lock_name in (
-        "runtime_environment.lock",
-        "runtime_environment.modal.lock",
-    ):
-        (PROJECT_ROOT / "cloud_training" / lock_name).write_text(
-            serialized_lock,
-            encoding="utf-8",
-        )
+    (MODAL_RUNTIME_ROOT / "runtime_environment.modal.lock").write_text(
+        "".join(f"{key}={value}\n" for key, value in lock_lines.items()),
+        encoding="utf-8",
+    )
     if operation == "preflight":
         completed = subprocess.run(
             [sys.executable, "-m", "pip", "freeze"],
@@ -494,12 +465,12 @@ def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
             capture_output=True,
             check=True,
         )
-        (runtime_root / "pip_freeze.txt").write_text(
+        (MODAL_RUNTIME_ROOT / "pip_freeze.txt").write_text(
             completed.stdout,
             encoding="utf-8",
         )
         if build_lock:
-            (runtime_root / "image_build_pip_freeze.txt").write_text(
+            (MODAL_RUNTIME_ROOT / "image_build_pip_freeze.txt").write_text(
                 build_lock,
                 encoding="utf-8",
             )
@@ -509,23 +480,96 @@ def _runtime_report(operation: str, *, require_gpu: bool) -> dict[str, Any]:
 
 
 def _make(target: str, *variables: str) -> None:
+    """Invoca un target del Makefile del proyecto contra los montajes remotos."""
     command = [
         "make",
         target,
         f"PYTHON={sys.executable}",
-        "CLOUD_TRAINING_DIR=cloud_training",
-        "LEAF_SEGMENTATION_DATASET=data/leaf_detection/detector_dataset",
+        f"CLOUD_TRAINING_DIR={REPO_ANCHOR}/cloud_training",
+        f"LEAF_SEGMENTATION_DATASET={DATASET_ROOT}",
         f"LEAF_SEGMENTATION_OUTPUT={SEGMENTATION_OUTPUT_ROOT}",
         "SEGMENTATION_MODEL=yolo26n-seg.pt",
         "SEGMENTATION_DEVICE=0",
         *variables,
     ]
-    _run(command, cwd=PROJECT_ROOT, environment=_project_environment())
+    _run(command, cwd=Path(REPO_ANCHOR), environment=_project_environment())
 
 
-def _reload_workspace_before_access() -> None:
+def _verify_mounted_dataset() -> dict[str, Any]:
+    """Recalcula los fingerprints congelados sobre el dataset montado.
+
+    @returns {dict[str, Any]} Reporte de locks verificados.
+    """
+    from src.training.segmentation_preflight import verify_cloud_training_payload
+
+    if not DATASET_ROOT.is_dir():
+        raise RuntimeError(
+            f"Falta el dataset en {DATASET_ROOT}; ejecute modal_training.py::seed_dataset"
+        )
+    locks = verify_cloud_training_payload(DATASET_ROOT)
+    if locks["parent_fingerprint"] != EXPECTED_PARENT_FINGERPRINT:
+        raise RuntimeError("El fingerprint padre montado no es el congelado")
+    if locks["split_fingerprints"]["test"] != EXPECTED_TEST_FINGERPRINT:
+        raise RuntimeError("El fingerprint de test montado no es el congelado")
+    return locks
+
+
+def _dataset_gate() -> dict[str, Any]:
+    """Verifica el dataset y persiste el marcador de la verificación."""
+    locks = _verify_mounted_dataset()
+    marker = {
+        "schema_version": 1,
+        "status": "verified",
+        "utc": _utc_now(),
+        "dataset_root": str(DATASET_ROOT),
+        "hf_dataset_repo": HF_DATASET_REPO,
+        **locks,
+    }
+    _write_json(DATASET_MARKER, marker)
+    return marker
+
+
+def _restore_initial_weights() -> Path | None:
+    """Repone en el directorio de trabajo los pesos iniciales guardados en el Volume.
+
+    El directorio de trabajo es la imagen, que es efímera: sin esta reposición cada
+    contenedor tendría que volver a descargar los pesos y ``weights_manifest.json``
+    apuntaría a una ruta inexistente en la operación siguiente.
+
+    @returns {Path|None} Ruta repuesta, o None si aún no hay copia persistente.
+    """
+    if not PERSISTENT_INITIAL_WEIGHTS.is_file():
+        return None
+    working = Path(REPO_ANCHOR) / INITIAL_WEIGHTS_NAME
+    if working.is_file() and _sha256(working) == _sha256(PERSISTENT_INITIAL_WEIGHTS):
+        return working
+    shutil.copy2(PERSISTENT_INITIAL_WEIGHTS, working)
+    return working
+
+
+def _persist_initial_weights() -> Path | None:
+    """Guarda en el Volume los pesos iniciales que la operación haya descargado.
+
+    @returns {Path|None} Ruta persistida, o None si no hay pesos que guardar.
+    """
+    working = Path(REPO_ANCHOR) / INITIAL_WEIGHTS_NAME
+    if not working.is_file():
+        return None
+    if (
+        PERSISTENT_INITIAL_WEIGHTS.is_file()
+        and _sha256(PERSISTENT_INITIAL_WEIGHTS) == _sha256(working)
+    ):
+        return PERSISTENT_INITIAL_WEIGHTS
+    PERSISTENT_INITIAL_WEIGHTS.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(working, PERSISTENT_INITIAL_WEIGHTS)
+    return PERSISTENT_INITIAL_WEIGHTS
+
+
+def _reload_volumes() -> None:
+    """Sincroniza los Volumes antes de leerlos."""
     os.chdir("/tmp")
-    workspace.reload()
+    dataset_volume.reload()
+    outputs_volume.reload()
 
 
 def _execute(
@@ -536,17 +580,20 @@ def _execute(
     validate_final_config: bool = False,
     variables: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    _reload_workspace_before_access()
-    _prepared_payload()
-    os.chdir(PROJECT_ROOT)
+    """Ejecuta un target con el dataset verificado y sincroniza los artefactos."""
+    _reload_volumes()
+    _dataset_gate()
+    os.chdir(REPO_ANCHOR)
+    _restore_initial_weights()
     if validate_final_config:
         _require_final_training_config()
     try:
         runtime = _runtime_report(operation, require_gpu=require_gpu)
         _make(target, *variables)
     finally:
-        workspace.commit()
-        print(f"Volume {VOLUME_NAME} sincronizado después de {operation}", flush=True)
+        _persist_initial_weights()
+        outputs_volume.commit()
+        print(f"Volume {OUTPUTS_VOLUME_NAME} sincronizado después de {operation}", flush=True)
     return runtime
 
 
@@ -555,7 +602,8 @@ def _require_summary(
     expected_status: str,
     *required_fields: str,
 ) -> dict[str, Any]:
-    path = ARTIFACT_PROJECT_ROOT / relative_path
+    """Exige un resumen con el estado y los campos declarados."""
+    path = SEGMENTATION_OUTPUT_ROOT / relative_path
     if not path.is_file():
         raise RuntimeError(f"Falta el resumen requerido: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -570,9 +618,10 @@ def _require_summary(
 
 
 def _checkpoint_record(path: Path) -> dict[str, Any]:
+    """Registra ruta, hash y tamaño de un checkpoint del Volume de artefactos."""
     resolved = path.resolve()
-    if not resolved.is_relative_to(ARTIFACT_PROJECT_ROOT.resolve()):
-        raise RuntimeError(f"Checkpoint fuera del proyecto persistente: {resolved}")
+    if not resolved.is_relative_to(OUTPUTS_MOUNT.resolve()):
+        raise RuntimeError(f"Checkpoint fuera del Volume de artefactos: {resolved}")
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
     return {
@@ -583,13 +632,14 @@ def _checkpoint_record(path: Path) -> dict[str, Any]:
 
 
 def _require_final_training_config() -> Path:
+    """Exige la configuración de 150 épocas congelada por el smoke."""
     import yaml
 
     expected = (
         SEGMENTATION_OUTPUT_ROOT / "segmenter/configs/train_yolo26n_seg.final.yaml"
     ).resolve()
     smoke = _require_summary(
-        "outputs/leaf_detection/segmenter/smoke_summary.json",
+        "segmenter/smoke_summary.json",
         "passed",
         "final_config",
         "final_config_sha256",
@@ -616,11 +666,13 @@ def _require_final_training_config() -> Path:
 
 
 def _require_confirmation(value: str, operation: str) -> None:
+    """Exige la confirmación literal para operaciones que entrenan."""
     if value != "true":
         raise RuntimeError(f"{operation} bloqueado: use --confirm true exactamente")
 
 
 def _experiment_paths(profile: str) -> tuple[Path, Path, Path]:
+    """Resuelve configuración y manifiestos de un experimento permitido."""
     filename = TRAINABLE_EXPERIMENTS.get(profile)
     if filename is None:
         allowed = ", ".join(sorted(TRAINABLE_EXPERIMENTS))
@@ -629,97 +681,46 @@ def _experiment_paths(profile: str) -> tuple[Path, Path, Path]:
             "d02b_imgsz768_seed42 y d04_yolo26s_seed42 permanecen bloqueados "
             "hasta completar su smoke específico."
         )
-    config = PROJECT_ROOT / "cloud_training" / "configs" / "experiments" / filename
-    manifest = (
-        SEGMENTATION_OUTPUT_ROOT
-        / "segmenter"
-        / "experiment_manifests"
-        / f"{profile}.json"
-    )
-    summary = (
-        SEGMENTATION_OUTPUT_ROOT
-        / "segmenter"
-        / "experiment_summaries"
-        / f"{profile}.json"
-    )
+    config = Path(REPO_ANCHOR) / "cloud_training" / "configs" / "experiments" / filename
+    manifest = SEGMENTATION_OUTPUT_ROOT / "segmenter" / "experiment_manifests" / f"{profile}.json"
+    summary = SEGMENTATION_OUTPUT_ROOT / "segmenter" / "experiment_summaries" / f"{profile}.json"
     return config, manifest, summary
 
 
-def _prepare_marker_payload(
-    root: Path,
-    archive: Path,
-    manifest: dict[str, Any],
-    prepare_result: str,
-    jpeg_validation: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "status": "ready",
-        "prepare_result": prepare_result,
-        "prepared_utc": _utc_now(),
-        "package": str(archive),
-        "package_name": PACKAGE_NAME,
-        "package_version": PACKAGE_VERSION,
-        "package_sha256": PACKAGE_SHA256,
-        "package_size_bytes": archive.stat().st_size,
-        "package_manifest_sha256": _sha256(
-            root / "cloud_training" / "package_manifest.json"
-        ),
-        "parent_fingerprint": manifest["parent_fingerprint"],
-        "payload_file_count": manifest["payload_file_count"],
-        "image_recipe_sha256": IMAGE_RECIPE_SHA256,
-        "jpeg_validation": jpeg_validation,
+@app.function(
+    image=modal_image,
+    volumes={DATASET_MOUNT_PATH: dataset_volume},
+    secrets=[HF_SECRET],
+    cpu=4.0,
+    memory=16384,
+    timeout=2 * 3600,
+)
+def seed_dataset(force: bool = False) -> dict[str, Any]:
+    """Siembra el dataset congelado en el Volume desde Hugging Face.
+
+    Idempotente: la descarga se omite cuando el árbol ya está materializado. ``force``
+    vacía el destino antes de volver a bajarlo.
+
+    @param {bool} force Elimina el árbol existente antes de descargar. Destructivo.
+    @returns {dict[str, Any]} Reporte de locks verificados tras la siembra.
+    """
+    from scripts.dataset.download_leaf_segmentation_dataset import download_dataset
+
+    locks = download_dataset(
+        repo_id=HF_DATASET_REPO,
+        dataset_root=DATASET_ROOT,
+        token=os.environ.get("HF_TOKEN"),
+        force=force,
+    )
+    dataset_volume.commit()
+    result = {
+        "status": "seeded",
+        "dataset_root": str(DATASET_ROOT),
+        "hf_dataset_repo": HF_DATASET_REPO,
+        **locks,
     }
-
-
-def _validate_release_jpegs(root: Path) -> dict[str, Any]:
-    """Run the pinned Ultralytics checker against a temporary dataset copy."""
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(root)
-    environment["YOLO_CONFIG_DIR"] = "/tmp/doctor_maiz_ultralytics_config"
-    code = (
-        "import json;"
-        "from pathlib import Path;"
-        "from src.data.jpeg_normalization import validate_jpegs_before_packaging;"
-        f"report=validate_jpegs_before_packaging(Path({str(root)!r})/"
-        "'data/leaf_detection/detector_dataset');"
-        "print('__JPEG_REPORT__'+json.dumps(report, sort_keys=True))"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=root,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            "Falló el escaneo JPEG/Ultralytics de prepare: "
-            f"stdout={completed.stdout[-2000:]!r}; stderr={completed.stderr[-2000:]!r}"
-        )
-    lines = [
-        line.removeprefix("__JPEG_REPORT__")
-        for line in completed.stdout.splitlines()
-        if line.startswith("__JPEG_REPORT__")
-    ]
-    if len(lines) != 1:
-        raise RuntimeError("El escaneo JPEG/Ultralytics no produjo un reporte único")
-    report = json.loads(lines[0])
-    if (
-        report.get("passed") is not True
-        or report.get("ultralytics_scan", {}).get("mutated_file_count") != 0
-    ):
-        raise RuntimeError(f"El escaneo JPEG/Ultralytics no quedó limpio: {report}")
-    return report
-
-
-def _remove_prepare_staging() -> None:
-    if not PREPARE_STAGING.exists() and not PREPARE_STAGING.is_symlink():
-        return
-    if PREPARE_STAGING.is_symlink() or not PREPARE_STAGING.is_dir():
-        raise RuntimeError(f"Temporal propio inseguro: {PREPARE_STAGING}")
-    shutil.rmtree(PREPARE_STAGING)
+    print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+    return result
 
 
 @app.function(
@@ -727,95 +728,15 @@ def _remove_prepare_staging() -> None:
     volumes=VOLUME_MOUNTS,
     cpu=4.0,
     memory=16384,
-    timeout=2 * 3600,
+    timeout=3600,
 )
-def prepare() -> dict[str, Any]:
-    """Verify and atomically prepare the frozen release inside the Volume."""
-    archive = INCOMING_ROOT / PACKAGE_NAME
-    if not archive.is_file():
-        raise FileNotFoundError(f"Falta {archive}; súbalo una vez con modal volume put")
-    actual_sha256 = _sha256(archive)
-    if actual_sha256 != PACKAGE_SHA256:
-        raise RuntimeError(f"SHA-256 del paquete inválido: {actual_sha256} != {PACKAGE_SHA256}")
-    sidecar = archive.with_suffix(archive.suffix + ".sha256")
-    if sidecar.is_file() and sidecar.read_text(encoding="utf-8").split()[0] != PACKAGE_SHA256:
-        raise RuntimeError(f"Sidecar SHA-256 inconsistente: {sidecar}")
-
-    try:
-        _remove_prepare_staging()
-        if PROJECT_ROOT.exists():
-            if PREPARED_MARKER.is_file():
-                payload = _prepared_payload()
-                _verify_extracted_release(PROJECT_ROOT)
-                result = {**payload, "prepare_result": "prepared_already"}
-                workspace.commit()
-                if not PREPARED_MARKER.is_file():
-                    raise RuntimeError("El marcador desapareció después del commit")
-                print(json.dumps(result, indent=2, sort_keys=True), flush=True)
-                return result
-
-            try:
-                manifest = _verify_extracted_release(PROJECT_ROOT)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Existe {PROJECT_ROOT} sin marcador y su identidad no es "
-                    "verificable; no se sobrescribe"
-                ) from exc
-            jpeg_validation = _validate_release_jpegs(PROJECT_ROOT)
-            recovered = _prepare_marker_payload(
-                PROJECT_ROOT,
-                archive,
-                manifest,
-                "prepared_recovered",
-                jpeg_validation,
-            )
-            _write_json(PREPARED_MARKER, recovered)
-            workspace.commit()
-            if not PREPARED_MARKER.is_file():
-                raise RuntimeError("No persistió el marcador recuperado")
-            print(json.dumps(recovered, indent=2, sort_keys=True), flush=True)
-            return recovered
-
-        PREPARE_STAGING.mkdir()
-        with tarfile.open(archive, "r:gz") as tar:
-            members = tar.getmembers()
-            roots = {Path(member.name).parts[0] for member in members}
-            unsafe = [
-                member.name
-                for member in members
-                if (
-                    not member.isfile()
-                    or member.name.startswith("/")
-                    or ".." in Path(member.name).parts
-                    or member.issym()
-                    or member.islnk()
-                )
-            ]
-            if roots != {PACKAGE_ROOT_NAME} or unsafe:
-                raise RuntimeError(f"Contenido tar inválido: roots={roots}, unsafe={unsafe[:5]}")
-            tar.extractall(PREPARE_STAGING, filter="data")
-        extracted = PREPARE_STAGING / PACKAGE_ROOT_NAME
-        manifest = _verify_extracted_release(extracted)
-        jpeg_validation = _validate_release_jpegs(extracted)
-        marker = _prepare_marker_payload(
-            extracted,
-            archive,
-            manifest,
-            "prepared",
-            jpeg_validation,
-        )
-        _write_json(extracted / PREPARED_MARKER.name, marker)
-        extracted.rename(PROJECT_ROOT)
-        PREPARE_STAGING.rmdir()
-        workspace.commit()
-        if not PREPARED_MARKER.is_file():
-            raise RuntimeError("No persistió el marcador de preparación")
-        print(json.dumps(marker, indent=2, sort_keys=True), flush=True)
-        return marker
-    except Exception:
-        _remove_prepare_staging()
-        workspace.commit()
-        raise
+def verify_dataset() -> dict[str, Any]:
+    """Recalcula los fingerprints del dataset montado y deja constancia."""
+    _reload_volumes()
+    marker = _dataset_gate()
+    outputs_volume.commit()
+    print(json.dumps(marker, indent=2, sort_keys=True), flush=True)
+    return marker
 
 
 @app.function(
@@ -827,14 +748,10 @@ def prepare() -> dict[str, Any]:
     timeout=3600,
 )
 def preflight() -> dict[str, Any]:
-    """Run the dataset, runtime, weights and Segment26 CUDA preflight."""
-    _execute(
-        "preflight",
-        "leaf-segmentation-cloud-preflight",
-        require_gpu=True,
-    )
+    """Ejecuta el preflight de dataset, runtime, pesos y CUDA."""
+    _execute("preflight", "leaf-segmentation-cloud-preflight", require_gpu=True)
     summary = _require_summary(
-        "outputs/leaf_detection/cloud_preflight/summary.json",
+        "cloud_preflight/summary.json",
         "ready_for_smoke_training",
         "dataset_verified",
         "gpu_verified",
@@ -853,7 +770,7 @@ def preflight() -> dict[str, Any]:
     timeout=2 * 3600,
 )
 def smoke(confirm: str = "false") -> dict[str, Any]:
-    """Run one AutoBatch epoch only after ``--confirm true``."""
+    """Ejecuta una única época con AutoBatch tras ``--confirm true``."""
     _require_confirmation(confirm, "smoke")
     runtime = _execute(
         "smoke",
@@ -862,7 +779,7 @@ def smoke(confirm: str = "false") -> dict[str, Any]:
         variables=("CONFIRM_SEGMENTATION_SMOKE_TRAINING=1",),
     )
     summary = _require_summary(
-        "outputs/leaf_detection/segmenter/smoke_summary.json",
+        "segmenter/smoke_summary.json",
         "passed",
         "save_dir",
         "selected_batch",
@@ -873,7 +790,7 @@ def smoke(confirm: str = "false") -> dict[str, Any]:
     )
     weights = Path(str(summary["save_dir"])) / "weights"
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed",
         "summary": str(SEGMENTATION_OUTPUT_ROOT / "segmenter/smoke_summary.json"),
         "selected_batch": summary["selected_batch"],
@@ -887,11 +804,8 @@ def smoke(confirm: str = "false") -> dict[str, Any]:
         },
         "runtime": runtime,
     }
-    _write_json(
-        SEGMENTATION_OUTPUT_ROOT / "segmenter/modal_smoke_manifest.json",
-        manifest,
-    )
-    workspace.commit()
+    _write_json(SEGMENTATION_OUTPUT_ROOT / "segmenter/modal_smoke_manifest.json", manifest)
+    outputs_volume.commit()
     print(json.dumps(manifest, indent=2, sort_keys=True), flush=True)
     return manifest
 
@@ -905,7 +819,7 @@ def smoke(confirm: str = "false") -> dict[str, Any]:
     timeout=24 * 3600,
 )
 def train(confirm: str = "false") -> dict[str, Any]:
-    """Run the frozen 150-epoch config and persist checkpoints in the Volume."""
+    """Ejecuta la configuración congelada de 150 épocas y persiste los checkpoints."""
     _require_confirmation(confirm, "train")
     _execute(
         "train",
@@ -919,7 +833,7 @@ def train(confirm: str = "false") -> dict[str, Any]:
         ),
     )
     summary = _require_summary(
-        "outputs/leaf_detection/segmenter/training_summary.json",
+        "segmenter/training_summary.json",
         "passed",
         "save_dir",
         "selected_batch",
@@ -940,20 +854,17 @@ def train(confirm: str = "false") -> dict[str, Any]:
     timeout=24 * 3600,
 )
 def experiment(profile: str, confirm: str = "false") -> dict[str, Any]:
-    """Run one allow-listed improvement experiment without touching the baseline."""
+    """Ejecuta un experimento permitido sin tocar el baseline."""
     _require_confirmation(confirm, "experiment")
     config, _, _ = _experiment_paths(profile)
     _execute(
         f"experiment:{profile}",
         "leaf-segmentation-cloud-train",
         require_gpu=True,
-        variables=(
-            "CONFIRM_SEGMENTATION_TRAINING=1",
-            f"CONFIG={config}",
-        ),
+        variables=("CONFIRM_SEGMENTATION_TRAINING=1", f"CONFIG={config}"),
     )
     summary = _require_summary(
-        f"outputs/leaf_detection/segmenter/experiment_summaries/{profile}.json",
+        f"segmenter/experiment_summaries/{profile}.json",
         "passed",
         "experiment_id",
         "save_dir",
@@ -975,7 +886,7 @@ def experiment(profile: str, confirm: str = "false") -> dict[str, Any]:
     timeout=24 * 3600,
 )
 def resume(confirm: str = "false") -> dict[str, Any]:
-    """Resume only the exact run identified by active_run_manifest.json."""
+    """Reanuda exclusivamente el run identificado por active_run_manifest.json."""
     _require_confirmation(confirm, "resume")
     _execute(
         "resume",
@@ -984,7 +895,7 @@ def resume(confirm: str = "false") -> dict[str, Any]:
         variables=("CONFIRM_SEGMENTATION_TRAINING=1",),
     )
     manifest = _require_summary(
-        "outputs/leaf_detection/segmenter/resume_manifest.json",
+        "segmenter/resume_manifest.json",
         "completed",
         "checkpoint",
         "checkpoint_sha256",
@@ -1005,7 +916,7 @@ def resume(confirm: str = "false") -> dict[str, Any]:
     timeout=24 * 3600,
 )
 def resume_experiment(profile: str, confirm: str = "false") -> dict[str, Any]:
-    """Resume the exact checkpoint registered for one allow-listed experiment."""
+    """Reanuda el checkpoint registrado para un experimento permitido."""
     _require_confirmation(confirm, "resume_experiment")
     _, active_manifest, _ = _experiment_paths(profile)
     _execute(
@@ -1018,7 +929,7 @@ def resume_experiment(profile: str, confirm: str = "false") -> dict[str, Any]:
         ),
     )
     manifest = _require_summary(
-        f"outputs/leaf_detection/segmenter/experiment_resume_manifests/{profile}.json",
+        f"segmenter/experiment_resume_manifests/{profile}.json",
         "completed",
         "checkpoint",
         "checkpoint_sha256",
@@ -1033,26 +944,52 @@ def resume_experiment(profile: str, confirm: str = "false") -> dict[str, Any]:
 @app.function(
     image=modal_image,
     volumes=VOLUME_MOUNTS,
+    cpu=2.0,
+    memory=8192,
+    timeout=1800,
+)
+def promote() -> dict[str, Any]:
+    """Promueve el best.pt entrenado al checkpoint que consume la inferencia."""
+    _reload_volumes()
+    from src.training.checkpoint_promotion import promote_checkpoint
+
+    registry = promote_checkpoint(OUTPUTS_MOUNT)
+    outputs_volume.commit()
+    print(json.dumps(registry, indent=2, sort_keys=True), flush=True)
+    return registry
+
+
+@app.function(
+    image=modal_image,
+    volumes=VOLUME_MOUNTS,
     gpu=REQUESTED_GPU,
     cpu=8.0,
     memory=32768,
     timeout=3 * 3600,
 )
-def validate() -> dict[str, Any]:
-    """Evaluate the exact baseline checkpoint exclusively on retained test."""
-    _execute(
-        "validate",
-        "leaf-segmentation-cloud-validate",
-        require_gpu=True,
-    )
+def validate(force_rerun: str = "false") -> dict[str, Any]:
+    """Evalúa el checkpoint promovido exclusivamente sobre el test retenido.
+
+    @param {str} force_rerun ``"true"`` archiva una evaluación previa y repite el test.
+        Repetirlo tras ver el resultado invalida su valor metodológico: exige decisión
+        formal registrada.
+    """
+    from src.training.checkpoint_promotion import expected_best_checkpoint_sha256
+
+    locked_counts = _verify_mounted_dataset()
+    if force_rerun == "true":
+        os.environ["FORCE_INTERNAL_TEST_RERUN"] = "1"
+    _execute("validate", "leaf-segmentation-cloud-validate", require_gpu=True)
     summary = _require_summary(
-        "outputs/leaf_detection/segmenter_evaluation/test_summary.json",
+        "segmenter_evaluation/test_summary.json",
         "passed",
         "requested_split",
         "evaluated_split",
         "split",
         "image_count",
-        "instance_count",
+        "annotation_count",
+        "loader_instance_count",
+        "evaluated_instance_count",
         "checkpoint",
         "checkpoint_sha256",
         "metrics",
@@ -1064,10 +1001,11 @@ def validate() -> dict[str, Any]:
         summary.get("requested_split") != "test"
         or summary.get("evaluated_split") != "test"
         or summary.get("split") != "test"
-        or summary.get("image_count") != 173
-        or summary.get("instance_count") != 183
+        or summary.get("image_count") != locked_counts["image_counts"]["test"]
+        or summary.get("annotation_count") != locked_counts["mask_counts"]["test"]
+        or summary.get("evaluated_instance_count") != summary.get("loader_instance_count")
         or summary.get("test_fingerprint") != EXPECTED_TEST_FINGERPRINT
-        or summary.get("checkpoint_sha256") != EXPECTED_BEST_CHECKPOINT_SHA256
+        or summary.get("checkpoint_sha256") != expected_best_checkpoint_sha256(OUTPUTS_MOUNT)
         or summary.get("pilot_used") is not False
         or summary.get("environment_modified") is not False
         or summary.get("environment_before") != summary.get("environment_after")
@@ -1090,12 +1028,8 @@ def validate() -> dict[str, Any]:
     timeout=1800,
 )
 def results() -> None:
-    """Print the persistent training-result inventory."""
-    _execute(
-        "results",
-        "leaf-segmentation-cloud-results",
-        require_gpu=False,
-    )
+    """Imprime el inventario persistente de resultados de entrenamiento."""
+    _execute("results", "leaf-segmentation-cloud-results", require_gpu=False)
 
 
 @app.function(
@@ -1106,9 +1040,26 @@ def results() -> None:
     timeout=3600,
 )
 def checksums() -> None:
-    """Write persistent hashes for the exact training artifacts."""
-    _execute(
-        "checksums",
-        "leaf-segmentation-cloud-checksums",
-        require_gpu=False,
-    )
+    """Escribe los hashes persistentes de los artefactos de entrenamiento."""
+    _execute("checksums", "leaf-segmentation-cloud-checksums", require_gpu=False)
+
+
+@app.function(
+    image=modal_image,
+    volumes=VOLUME_MOUNTS,
+    cpu=2.0,
+    memory=4096,
+    timeout=1800,
+)
+def clean_outputs(confirm: str = "false") -> dict[str, Any]:
+    """Vacía el Volume de artefactos tras ``--confirm true``."""
+    _require_confirmation(confirm, "clean_outputs")
+    _reload_volumes()
+    removed = []
+    if SEGMENTATION_OUTPUT_ROOT.exists():
+        removed = sorted(entry.name for entry in SEGMENTATION_OUTPUT_ROOT.iterdir())
+        shutil.rmtree(SEGMENTATION_OUTPUT_ROOT, ignore_errors=True)
+    outputs_volume.commit()
+    result = {"status": "cleaned", "removed": removed}
+    print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+    return result

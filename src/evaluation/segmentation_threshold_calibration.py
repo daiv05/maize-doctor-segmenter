@@ -52,7 +52,9 @@ def choose_selection_threshold(
             _as_float(row["mean_dice"], "mean_dice"),
             _as_float(row["mean_leaf_pixel_recall"], "mean_leaf_pixel_recall"),
             _as_float(row["mean_leaf_pixel_precision"], "mean_leaf_pixel_precision"),
-            -_as_float(row["fallback_rate"], "fallback_rate"),
+            -_as_float(
+                row["images_without_detection_rate"], "images_without_detection_rate"
+            ),
             _as_float(candidate["selection_threshold"], "selection_threshold"),
         )
 
@@ -61,7 +63,9 @@ def choose_selection_threshold(
         return (
             _as_float(row["mean_leaf_pixel_recall"], "mean_leaf_pixel_recall"),
             _as_float(row["mean_dice"], "mean_dice"),
-            -_as_float(row["fallback_rate"], "fallback_rate"),
+            -_as_float(
+                row["images_without_detection_rate"], "images_without_detection_rate"
+            ),
             _as_float(candidate["selection_threshold"], "selection_threshold"),
         )
 
