@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
-import torch
 import yaml
 from PIL import Image, ImageDraw
 
@@ -43,6 +42,9 @@ EXPECTED_COMBINED_FINGERPRINT = (
     "96833e43a46c959f0d5c86615b1d1ea6deecb139063eea9c877986a61084c0e1"
 )
 EXPECTED_SEED = 42
+EXPECTED_INITIAL_WEIGHTS_SHA256 = {
+    "yolo26n-seg.pt": "361fbfabab285c3237700b6bb91d7ecfa602cd945fffda8dbe1242829b71e73f",
+}
 EXPECTED_IMAGE_TOTAL = 1155
 EXPECTED_MASK_TOTAL = 1224
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -307,7 +309,13 @@ def _memory_report() -> dict[str, int | None]:
 
 
 def audit_environment(project_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Collect environment, dependency and hardware facts without mutation."""
+    """Collect environment, dependency and hardware facts without mutation.
+
+    ``torch`` se importa aquí y no a nivel de módulo para que los targets de sólo
+    lectura del Makefile no exijan la pila CUDA completa.
+    """
+    import torch
+
     nvidia = _nvidia_report()
     cuda_available = torch.cuda.is_available()
     disk = shutil.disk_usage(project_root)
@@ -543,6 +551,8 @@ def run_loader_smoke_test(
     seed: int = 42,
 ) -> dict[str, Any]:
     """Load 4/2/2 samples, rasterize masks and create one finite tensor batch."""
+    import torch
+
     manifest = dataset_root / "manifests" / "split_manifest.csv"
     with manifest.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))

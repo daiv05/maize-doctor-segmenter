@@ -44,4 +44,7 @@ el entrenamiento remoto, la inferencia del segmentador y las evaluaciones de cal
 - [Protocolo de mejora](/es/leaf-detection/segmentation-improvement-protocol)
 - [Resultados de D-01](/es/leaf-detection/segmentation-d01-results)
 - [Quality gate](/es/leaf-detection/segmentation-reliability-gate-audit)
+- [Revisión profunda del pipeline](/es/leaf-detection/segmentation-pipeline-deep-review)
+- [Bitácora de sesión 2026-09-08](/es/leaf-detection/bitacora-sesion-2026-09-08)
+- [Auditoría del segmentador (2026-09)](/es/leaf-detection/auditoria-segmentador-2026-09)
 - [Decisiones de arquitectura](/es/decisions/adr-leaf-instance-segmentation-strategy)

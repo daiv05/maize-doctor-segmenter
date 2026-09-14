@@ -291,12 +291,9 @@ def _filter_image_normalization_manifest(
             f"rows={len(filtered)}, images={len(final_names)}"
         )
     for row in filtered:
-        row["derived_path"] = str(
-            final_dataset_root
-            / "all"
-            / "images"
-            / Path(row["derived_path"]).name
-        )
+        row["derived_path"] = (
+            final_dataset_root / "all" / "images" / Path(row["derived_path"]).name
+        ).as_posix()
     write_csv(path, filtered, IMAGE_NORMALIZATION_COLUMNS)
     return {
         "jpeg_images": len(filtered),

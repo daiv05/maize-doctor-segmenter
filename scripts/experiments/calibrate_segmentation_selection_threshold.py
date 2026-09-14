@@ -21,6 +21,7 @@ import yaml
 from PIL import Image
 
 from src.config import get_output_root, get_project_data_root
+from src.data.loader import load_and_normalize_image
 from src.evaluation.segmentation_downstream import (
     ROW_COLUMNS,
     MaskPair,
@@ -151,8 +152,7 @@ def main() -> None:
     }
     for index, manifest in enumerate(manifest_rows, start=1):
         image_path = args.dataset_root / manifest["materialized_image_path"]
-        with Image.open(image_path) as source:
-            image = source.convert("RGB")
+        image = load_and_normalize_image(str(image_path))
         raw_instances = tuple(segmenter.segment(image))
         truth = rasterize_polygons(
             read_yolo_polygons(args.dataset_root / manifest["materialized_label_path"]),

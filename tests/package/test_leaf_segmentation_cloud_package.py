@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts.package import build_leaf_segmentation_cloud_package as package
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CLOUD = ROOT / "cloud_training"
 
 
+@pytest.mark.requires_dataset
 def test_cloud_payload_fingerprints_are_valid_without_all_tree() -> None:
     report = verify_cloud_training_payload(
         ROOT / "data" / "leaf_detection" / "detector_dataset"
@@ -27,8 +29,10 @@ def test_every_shell_script_is_strict_and_syntax_valid() -> None:
         source = path.read_text(encoding="utf-8")
         assert "set -euo pipefail" in source
         result = subprocess.run(
-            ["bash", "-n", str(path)],
+            ["bash", "-n", path.name],
+            cwd=str(CLOUD),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -59,10 +63,13 @@ def test_internal_test_has_a_single_use_gate() -> None:
     assert "exit 2" in source[guard:invocation]
 
 
-def test_validation_is_single_use_and_explicitly_requests_retained_test() -> None:
-    """La evaluación final no puede caer en el split predeterminado de YOLO."""
-    source = (CLOUD / "validate.sh").read_text(encoding="utf-8")
-    assert "FORCE_INTERNAL_TEST_RERUN" not in source
+def test_validation_delegates_to_the_single_retained_test_implementation() -> None:
+    """`validate` y `test` son la misma evaluación: una sola implementación y un guard."""
+    validate = (CLOUD / "validate.sh").read_text(encoding="utf-8")
+    assert "evaluate_test.sh" in validate
+    assert "run_ultralytics.py" not in validate
+
+    source = (CLOUD / "evaluate_test.sh").read_text(encoding="utf-8")
     assert "val_summary.json" not in source
     assert "--split test" in source
     assert "--split val" not in source
@@ -70,6 +77,7 @@ def test_validation_is_single_use_and_explicitly_requests_retained_test() -> Non
     invocation = source.index("run_ultralytics.py")
     assert guard < invocation
     assert "exit 2" in source[guard:invocation]
+    assert "FORCE_INTERNAL_TEST_RERUN" in source[guard:invocation]
 
 
 def test_cloud_scripts_reuse_the_bootstrap_environment() -> None:
@@ -135,6 +143,7 @@ def test_full_train_script_accepts_only_config_environment() -> None:
     assert "configs/train_yolo26n_seg.yaml" not in source
 
 
+@pytest.mark.requires_dataset
 def test_allow_list_excludes_protected_and_historical_trees() -> None:
     relatives = {
         path.relative_to(ROOT).as_posix() for path in package.collect_payload(ROOT)
@@ -164,6 +173,7 @@ def test_tar_metadata_is_deterministic() -> None:
     assert first.mtime == first.uid == first.gid == 0
 
 
+@pytest.mark.requires_pilot
 def test_pilot_transport_manifest_is_separate() -> None:
     manifest = package.pilot_manifest(ROOT)
     assert manifest["included_in_training_package"] is False

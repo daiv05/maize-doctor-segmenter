@@ -46,11 +46,16 @@ class _AssessmentCommon(TypedDict):
 
 @dataclass(frozen=True)
 class SegmentationQualityGateConfig:
-    """Thresholds derived from the human-reviewed reliability sample."""
+    """Umbrales calibrados sobre la revisión humana congelada de 42 imágenes.
+
+    Los valores por defecto son exactamente los de ``config/segmentation.yaml``: un
+    consumidor que instancie esta clase sin pasar por :func:`from_mapping` obtiene el
+    mismo gate que produce la calibración, nunca uno más permisivo.
+    """
 
     max_mask_area_ratio: float = 0.999
-    large_mask_area_ratio: float = 0.50
-    min_large_mask_bbox_ratio: float = 0.70
+    large_mask_area_ratio: float = 0.25
+    min_large_mask_bbox_ratio: float = 0.80
     max_large_mask_normalized_perimeter: float = 8.0
     min_multi_instance_score_margin: float = 0.33
 
@@ -190,7 +195,7 @@ def _assessment(
 def assess_segmentation_legacy(
     result: SegmentedLeafProcessingResult,
     *,
-    reject_multiple_eligible: bool = True,
+    reject_multiple_eligible: bool = False,
 ) -> SegmentationAssessment:
     """Reproduce the pre-quality-gate policy for before/after audits."""
     eligible = sum(trace.eligible for trace in result.selection_traces)
@@ -246,7 +251,7 @@ def assess_segmentation_legacy(
 def assess_segmentation(
     result: SegmentedLeafProcessingResult,
     *,
-    reject_multiple_eligible: bool = True,
+    reject_multiple_eligible: bool = False,
     quality_gate: SegmentationQualityGateConfig | None = None,
 ) -> SegmentationAssessment:
     """Map selector and transparent mask-quality evidence to a status."""

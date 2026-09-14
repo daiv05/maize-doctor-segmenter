@@ -13,11 +13,16 @@ from src.preprocessing.leaf_roi import RGBColor, image_to_rgb, normalize_rgb_col
 
 @dataclass(frozen=True)
 class LetterboxResult:
-    """Letterboxed image and geometry useful for later coordinate tracing."""
+    """Imagen con letterbox y geometría para trazar coordenadas después.
+
+    Las dos convenciones conviven a propósito y por eso están marcadas en el nombre:
+    ``*_width_height`` sigue el orden de Pillow y ``target_size`` el ``(alto, ancho)``
+    del proyecto. Con tamaños no cuadrados confundirlas deja de ser inocuo.
+    """
 
     image: Image.Image
-    original_size: tuple[int, int]
-    resized_size: tuple[int, int]
+    original_size_width_height: tuple[int, int]
+    resized_size_width_height: tuple[int, int]
     target_size: tuple[int, int]
     padding: tuple[int, int, int, int]
     scale: float
@@ -104,8 +109,8 @@ def letterbox_image(
     canvas.paste(resized, (left, top))
     return LetterboxResult(
         image=canvas,
-        original_size=source.size,
-        resized_size=resized.size,
+        original_size_width_height=source.size,
+        resized_size_width_height=resized.size,
         target_size=(target_height, target_width),
         padding=(left, top, right, bottom),
         scale=scale,

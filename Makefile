@@ -23,13 +23,13 @@ PREDICTIONS ?=
 SPLIT ?= val
 
 MODAL_SEGMENTATION_APP ?= modal_training.py
-MODAL_SEGMENTATION_VOLUME ?= doctor-maiz-leaf-segmentation
+MODAL_SEGMENTATION_DATASET_VOLUME ?= doctor-maiz-leaf-segmentation-data
+MODAL_SEGMENTATION_OUTPUTS_VOLUME ?= doctor-maiz-leaf-segmentation-outputs
 MODAL_SEGMENTATION_GPU ?= A10
-MODAL_SEGMENTATION_PACKAGE ?= $(LEAF_SEGMENTATION_PACKAGE_DIR)/doctor_maiz_leaf_segmentation_cloud_v7-segmentation-improvements-7a4a5c08-seed42.tar.gz
-MODAL_SEGMENTATION_PACKAGE_SHA256 ?= $(shell sed -n '1s/[[:space:]].*//p' "$(MODAL_SEGMENTATION_PACKAGE).sha256" 2>/dev/null)
-MODAL_SEGMENTATION_PROJECT_ROOT ?= /project_v4-7a4a5c08-seed42
 MODAL_SEGMENTATION_DOWNLOAD_DIR ?= outputs-remote-leaf-segmentation
 MODAL_SEGMENTATION_EXPERIMENT ?= d01_mosaic0_seed42
+HF_SEGMENTATION_DATASET_REPO ?= daiv05/corn-leaf-instance-segmentation
+HF_SEGMENTATION_STAGE_DIR ?=
 
 .PHONY: help \
 	leaf-segmentation-status leaf-segmentation-verify-locks \
@@ -44,14 +44,16 @@ MODAL_SEGMENTATION_EXPERIMENT ?= d01_mosaic0_seed42
 	leaf-segmentation-cloud-prepare leaf-segmentation-cloud-check \
 	leaf-segmentation-downstream-metrics leaf-segmentation-reliability-audit \
 	leaf-segmentation-calibrate-quality-gate leaf-segmentation-calibrate-selection \
-	leaf-segmentation-modal-volume-create \
-	leaf-segmentation-modal-upload leaf-segmentation-modal-prepare \
+	leaf-segmentation-hf-publish leaf-segmentation-hf-download \
+	leaf-segmentation-promote-checkpoint \
+	leaf-segmentation-modal-seed leaf-segmentation-modal-verify-dataset \
+	leaf-segmentation-modal-promote \
 	leaf-segmentation-modal-preflight leaf-segmentation-modal-smoke \
 	leaf-segmentation-modal-train leaf-segmentation-modal-resume \
 	leaf-segmentation-modal-experiment leaf-segmentation-modal-experiment-resume \
 	leaf-segmentation-modal-validate leaf-segmentation-modal-results \
 	leaf-segmentation-modal-checksums leaf-segmentation-modal-download \
-	install lint lint-fix fmt check clean-outputs
+	install lint lint-fix fmt fmt-check check clean-outputs
 
 LEAF_SEGMENTATION_MAKE_HELPER = $(PYTHON) scripts/package/leaf_segmentation_make.py \
 	--dataset "$(LEAF_SEGMENTATION_DATASET)" \
@@ -96,26 +98,35 @@ help:
 		'  leaf-segmentation-downstream-metrics     IoU/Dice/recall por fuente' \
 		'                                           PREDICTIONS=<dir> [SPLIT=val]' \
 		'  leaf-segmentation-reliability-audit      Gate visual reproducible' \
+		'                                           OPCIONAL: exige DATASET_ROOT con el corpus del clasificador' \
 		'  leaf-segmentation-calibrate-quality-gate Calibrar gate con revisión humana' \
 		'  leaf-segmentation-calibrate-selection    Barrer umbral sólo sobre val' \
 		'' \
 		'CLOUD / SIN ENTRENAR:' \
 		'  leaf-segmentation-cloud-bootstrap        Instalar en entorno cloud aislado' \
 		'  leaf-segmentation-cloud-preflight        GPU, modelo, pesos y forward' \
-		'  leaf-segmentation-cloud-validate         best.pt sobre test retenido' \
-		'  leaf-segmentation-cloud-test             best.pt sobre test interno' \
+		'  leaf-segmentation-cloud-validate         Alias de cloud-test (misma evaluación)' \
+		'  leaf-segmentation-cloud-test             best.pt sobre test retenido, un solo uso' \
+		'                                           repetirlo exige FORCE_INTERNAL_TEST_RERUN=1' \
 		'  leaf-segmentation-cloud-results          Mostrar resultados sin cambiarlos' \
 		'  leaf-segmentation-cloud-checksums        Hashes de resultados' \
 		'' \
+		'DATASET / HUGGING FACE:' \
+		'  leaf-segmentation-hf-publish             Publicar el dataset congelado (HF_SEGMENTATION_STAGE_DIR=<dir>)' \
+		'  leaf-segmentation-hf-download            Descargar y verificar el dataset publicado' \
+		'' \
 		'MODAL / SEGMENTACIÓN:' \
-		'  leaf-segmentation-modal-volume-create    Crear Volume persistente' \
-		'  leaf-segmentation-modal-upload           Subir paquete del segmentador una vez' \
-		'  leaf-segmentation-modal-prepare          Verificar y extraer el paquete' \
+		'  leaf-segmentation-modal-seed             Sembrar el dataset en el Volume desde Hugging Face' \
+		'  leaf-segmentation-modal-verify-dataset   Recalcular fingerprints sobre el Volume' \
 		'  leaf-segmentation-modal-preflight        Validar entorno y GPU (A10)' \
-		'  leaf-segmentation-modal-validate         Evaluar best.pt sólo sobre test' \
+		'  leaf-segmentation-modal-promote          Promover best.pt al checkpoint servible' \
+		'  leaf-segmentation-modal-validate         Evaluar el checkpoint promovido sólo sobre test' \
 		'  leaf-segmentation-modal-results          Inventario persistente' \
 		'  leaf-segmentation-modal-checksums        Hashes persistentes' \
 		'  leaf-segmentation-modal-download         Descargar resultados' \
+		'' \
+		'INFERENCIA:' \
+		'  leaf-segmentation-promote-checkpoint     Promover best.pt local al checkpoint servible' \
 		'' \
 		'ENTRENAMIENTO / CONFIRMACIÓN OBLIGATORIA:' \
 		'  leaf-segmentation-cloud-smoke   CONFIRM_SEGMENTATION_SMOKE_TRAINING=1' \
@@ -265,35 +276,29 @@ leaf-segmentation-cloud-prepare: leaf-segmentation-verify-locks \
 leaf-segmentation-cloud-check: leaf-segmentation-status \
 	leaf-segmentation-verify-locks leaf-segmentation-verify-splits
 
-leaf-segmentation-modal-volume-create:
-	$(MODAL) volume create "$(MODAL_SEGMENTATION_VOLUME)"
+leaf-segmentation-hf-publish:
+	$(if $(HF_SEGMENTATION_STAGE_DIR),,$(error ERROR: indique HF_SEGMENTATION_STAGE_DIR=<directorio con ~2.4 GB libres>))
+	$(PYTHON) scripts/dataset/upload_leaf_segmentation_dataset.py \
+		--repo-id "$(HF_SEGMENTATION_DATASET_REPO)" \
+		--dataset-root "$(LEAF_SEGMENTATION_DATASET)" \
+		--stage-dir "$(HF_SEGMENTATION_STAGE_DIR)"
 
-leaf-segmentation-modal-upload:
-	@test -f "$(MODAL_SEGMENTATION_PACKAGE)" || { \
-		printf '%s\n' "ERROR: falta $(MODAL_SEGMENTATION_PACKAGE)" >&2; \
-		exit 1; \
-	}
-	@test -f "$(MODAL_SEGMENTATION_PACKAGE).sha256" || { \
-		printf '%s\n' "ERROR: falta $(MODAL_SEGMENTATION_PACKAGE).sha256" >&2; \
-		exit 1; \
-	}
-	@set -- $$(sha256sum "$(MODAL_SEGMENTATION_PACKAGE)"); \
-		test "$$1" = "$(MODAL_SEGMENTATION_PACKAGE_SHA256)" || { \
-			printf '%s\n' "ERROR: SHA-256 local inesperado: $$1" >&2; \
-			exit 1; \
-		}
-	@set -- $$(sed -n '1p' "$(MODAL_SEGMENTATION_PACKAGE).sha256"); \
-		test "$$1" = "$(MODAL_SEGMENTATION_PACKAGE_SHA256)" || { \
-			printf '%s\n' "ERROR: sidecar SHA-256 inesperado: $$1" >&2; \
-			exit 1; \
-		}
-	$(MODAL) volume put "$(MODAL_SEGMENTATION_VOLUME)" \
-		"$(MODAL_SEGMENTATION_PACKAGE)" "/incoming/"
-	$(MODAL) volume put "$(MODAL_SEGMENTATION_VOLUME)" \
-		"$(MODAL_SEGMENTATION_PACKAGE).sha256" "/incoming/"
+leaf-segmentation-hf-download:
+	$(PYTHON) scripts/dataset/download_leaf_segmentation_dataset.py \
+		--repo-id "$(HF_SEGMENTATION_DATASET_REPO)" \
+		--dataset-root "$(LEAF_SEGMENTATION_DATASET)"
 
-leaf-segmentation-modal-prepare:
-	$(MODAL) run $(MODAL_SEGMENTATION_APP)::prepare
+leaf-segmentation-promote-checkpoint:
+	$(PYTHON) scripts/pipeline/promote_leaf_segmentation_checkpoint.py
+
+leaf-segmentation-modal-seed:
+	$(MODAL) run $(MODAL_SEGMENTATION_APP)::seed_dataset
+
+leaf-segmentation-modal-verify-dataset:
+	$(MODAL) run $(MODAL_SEGMENTATION_APP)::verify_dataset
+
+leaf-segmentation-modal-promote:
+	$(MODAL) run $(MODAL_SEGMENTATION_APP)::promote
 
 leaf-segmentation-modal-preflight:
 	$(REQUIRE_MODAL_SEGMENTATION_GPU)
@@ -345,18 +350,23 @@ leaf-segmentation-modal-checksums:
 
 leaf-segmentation-modal-download:
 	mkdir -p "$(MODAL_SEGMENTATION_DOWNLOAD_DIR)"
-	$(MODAL) volume get --force "$(MODAL_SEGMENTATION_VOLUME)" \
-		"$(MODAL_SEGMENTATION_PROJECT_ROOT)/outputs/leaf_detection/" \
+	$(MODAL) volume get --force "$(MODAL_SEGMENTATION_OUTPUTS_VOLUME)" \
+		"leaf_detection" \
 		"$(MODAL_SEGMENTATION_DOWNLOAD_DIR)"
 
+LINT_PATHS ?= src/ scripts/ tests/ cloud_training/run_ultralytics.py modal_training.py
+
 lint:
-	$(RUFF) check src/ scripts/
+	$(RUFF) check $(LINT_PATHS)
 
 lint-fix:
-	$(RUFF) check --fix src/ scripts/
+	$(RUFF) check --fix $(LINT_PATHS)
 
 fmt:
-	$(RUFF) format src/ scripts/
+	$(RUFF) format $(LINT_PATHS)
+
+fmt-check:
+	$(RUFF) format --check $(LINT_PATHS)
 
 check:
-	$(PYRIGHT) src/ scripts/
+	$(PYRIGHT) $(LINT_PATHS)
