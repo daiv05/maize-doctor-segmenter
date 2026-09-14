@@ -1,8 +1,6 @@
 # DoctorMaiz Leaf Segmentation
 
-Proyecto independiente para preparar, entrenar, auditar y ejecutar un segmentador de
-hojas de maíz basado en YOLO instance segmentation. El repositorio no contiene el
-clasificador de enfermedades: ese modelo y sus pipelines viven en [`maize-doctor-classifier`](https://github.com/abner-rivas/maize-doctor-segmenter-leaf), que consume este segmentador para derivar una máscara foliar.
+Proyecto independiente para preparar, entrenar, auditar y ejecutar un segmentador de hojas de maíz basado en YOLO instance segmentation. El repositorio no contiene el clasificador de enfermedades: ese modelo y sus pipelines viven en [`maize-doctor-classifier`](https://github.com/daiv05/maize-doctor-classifier), que consume este segmentador para derivar una máscara foliar.
 
 ## Alcance
 
@@ -13,8 +11,7 @@ clasificador de enfermedades: ese modelo y sus pipelines viven en [`maize-doctor
 - inferencia del segmentador, selección determinista de la hoja y salidas de máscara;
 - métricas IoU/Dice/recall, calibración y auditoría del quality gate.
 
-Los datos materializados viven en `data/leaf_detection/`; los checkpoints, paquetes,
-predicciones y reportes viven en `outputs/leaf_detection/` y no se versionan.
+Los datos materializados viven en `data/leaf_detection/`; los checkpoints, paquetes, predicciones y reportes viven en `outputs/leaf_detection/` y no se versionan.
 
 ## Estado
 
@@ -28,8 +25,7 @@ predicciones y reportes viven en `outputs/leaf_detection/` y no se versionan.
 | Validación sobre hojas enfermas | 150/150 reliable, IoU `0.98122` |
 | Evaluación final sobre `test` | bloqueada; ver [auditoría](docs/es/leaf-detection/segmentation-pipeline-deep-review.md) |
 
-D-01 es el candidato actual, no el promovido: mejora el Mask mAP50-95 del baseline en 0.59 puntos porcentuales, pero esa comparación usa `val` y todavía no demuestra estabilidad entre semillas. Los detalles reproducibles, con hashes de paquete, configuración y pesos, están en
-[resultados de D-01](docs/es/leaf-detection/segmentation-d01-results.md).
+D-01 es el candidato actual, no el promovido: mejora el Mask mAP50-95 del baseline en 0.59 puntos porcentuales, pero esa comparación usa `val` y todavía no demuestra estabilidad entre semillas. Los detalles reproducibles, con hashes de paquete, configuración y pesos, están en [resultados de D-01](docs/es/leaf-detection/segmentation-d01-results.md).
 
 ## Inicio rápido
 
@@ -45,8 +41,7 @@ make leaf-segmentation-verify-locks
 make leaf-segmentation-verify-splits
 ```
 
-El entrenamiento nunca se inicia implícitamente. Los targets de smoke, train y resume
-exigen las confirmaciones literales mostradas por `make help`.
+El entrenamiento nunca se inicia implícitamente. Los targets de smoke, train y resume exigen las confirmaciones literales mostradas por `make help`.
 
 Variables de entorno y requisitos en [LOCAL.md](LOCAL.md).
 
@@ -62,8 +57,7 @@ Variables de entorno y requisitos en [LOCAL.md](LOCAL.md).
 | `crop_mask_letterbox` | Igual que el anterior, ajustado a `target_size` con letterbox |
 | `square_crop` | Recorte cuadrado centrado en la hoja, conservando el fondo natural |
 
-`fallback` decide qué ocurre cuando el quality gate rechaza la máscara: `original` devuelve la
-imagen sin tocar, `reject` la descarta.
+`fallback` decide qué ocurre cuando el quality gate rechaza la máscara: `original` devuelve la imagen sin tocar, `reject` la descarta.
 
 ## Estructura
 
@@ -134,10 +128,6 @@ make leaf-segmentation-modal-download
 
 El código de este repositorio se distribuye bajo la licencia MIT. Ver [LICENSE](LICENSE).
 
-El extra opcional `segmentation` instala `ultralytics==8.4.104`, publicada bajo **AGPL-3.0**. MIT
-cubre el código propio, no las dependencias: distribuir un trabajo combinado con Ultralytics, o
-exponerlo como servicio en red, activa las obligaciones de la AGPL. Para un uso que no pueda
-asumirlas hace falta la licencia comercial de Ultralytics o sustituir esa dependencia. Los
-datasets externos consolidados conservan además sus propias licencias de origen.
+El extra opcional `segmentation` instala `ultralytics==8.4.104`, publicada bajo **AGPL-3.0**. MIT cubre el código propio, no las dependencias: distribuir un trabajo combinado con Ultralytics, o exponerlo como servicio en red, activa las obligaciones de la AGPL. Para un uso que no pueda asumirlas hace falta la licencia comercial de Ultralytics o sustituir esa dependencia. Los datasets externos consolidados conservan además sus propias licencias de origen.
 
 Proyecto académico desarrollado en la Universidad de El Salvador.
