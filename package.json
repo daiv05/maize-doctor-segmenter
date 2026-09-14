@@ -1,6 +1,7 @@
 {
   "name": "maize-doctor-segmentation",
   "private": true,
+  "license": "MIT",
   "engines": {
     "node": ">=20.19.0"
   },
